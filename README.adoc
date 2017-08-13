@@ -1,0 +1,4 @@
+= Fulcro SQL
+
+This will be a library that can run Om Next graph queries against an SQL database to make it easier to build
+data-driven apps that need to use a relational database for the back-end. 
