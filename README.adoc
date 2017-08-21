@@ -11,5 +11,9 @@ Running tests for development:
 2. Run `(test-suite)`
 3. Browse to http://localhost:8888/fulcro-spec-server-tests.html
 
+The tests are encoded via fulcro-spec, but are just plain clj tests, so you can run them
+however you would normally run clojure tests; however, the output and UI are much better
+if you use the web-based rendering.
+
 
 
