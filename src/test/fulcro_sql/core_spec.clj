@@ -1,6 +1,6 @@
 (ns fulcro-sql.core-spec
   (:require
-    [fulcro-spec.core :refer [assertions specification]]
+    [fulcro-spec.core :refer [assertions specification behavior when-mocking]]
     [fulcro-sql.core :as core]))
 
 "
@@ -25,7 +25,7 @@ for a given graph walk.
 Steps:
 
 1. Your code generates the root set from a property key and params
-  - Root set is a data structure with the shape {:rows [] :row-ids #{}}
+  - Root set is a data structure with the shape {:rows [] :ids #{}}
 2. Subquery is processed:
    - Derive what table the subquery is hitting
    - Generate the column list for all properties and join (ids) that exist
@@ -42,25 +42,58 @@ Steps:
    ; convention is :TABLE/COLUMN as a keyword. Hypens auto-map to underscores.
    ; All other special characters are dropped. e.g. :user/is-ok? becomes :user/is_ok
    ; More complex mapping must be manually done via this configuration:
-   :omprop->dbprop   {:db/id :id}
-
-   ; A second layer of mapping. This gets whole groups of props for renaming
-   ; the namespace to the proper table (map of symbol to symbol).
-   :namespace->table {'person   'user
-                      'settings 'account}
+   :om->sql {:db/id :id}
 
    ; Joins are configured with respect to the SQL database, *not* the Om
    ; props.
-   :joins            {
-                      :user/account_id {:type         :one-to-one
-                                        :target-table :account
-                                        :join-from    :user/account_id
-                                        }
+   :joins   {
+             :user/account_id {:type         :one-to-one
+                               :target-table :account
+                               :join-from    :user/account_id
+                               }
 
-                      }
+             }
 
    })
 
-(specification "Root Set"
-  (assertions
-    1 => 1))
+(specification "Table Detection: `table-for`"
+  (let [schema {:om->sql {:thing/name    :sql_table/name
+                          :boo/blah      :sql_table/prop
+                          :the-thing/boo :the-table/bah}}]
+    (assertions
+      "Detects the correct table name if all of the properties agree"
+      (core/table-for schema [:account/name :account/status]) => :account
+      "Detects the correct table name if all of the properties agree, and there is also a :db/id"
+      (core/table-for schema [:db/id :account/name :account/status]) => :account
+      "Remaps known om->sql properties to ensure detection"
+      (core/table-for schema [:thing/name :boo/blah]) => :sql_table
+      "Throws an exception if a distinct table name cannot be resolved"
+      (core/table-for schema [:db/id :account/name :user/status]) =throws=> (AssertionError #"Could not determine a single")
+      "Ensures derived table names use underscores instead of hypens"
+      (core/table-for schema [:a-thing/name]) => :a_thing
+      (core/table-for schema [:the-thing/boo]) => :the_table
+      (core/table-for schema [:the-crazy-woods/a]) => :the_crazy_woods)))
+
+
+(specification "Column Specification"
+  (let [schema      {:om->sql {:thing/name    :sql_table/name
+                               :boo/blah      :sql_table/prop
+                               :the-thing/boo :the-table/bah}}
+        table-alias "a1"]
+    (assertions
+      "Converts an Om property to a proper column selector in SQL, with as AS clause of the Om property"
+      (core/column-spec table-alias schema :account/name) => "a1.name AS \":account/name\""
+      (core/column-spec table-alias schema :thing/name) => "a1.name AS \":thing/name\""
+      (core/column-spec table-alias schema :the-thing/boo) => "a1.bah AS \":the-thing/boo\"")))
+
+(comment
+  (specification "Om Property-only Query"
+    (behavior "Given a root set of IDs and an Om query for properties (no joins)"
+      (let [root-set {:rows [{:id 1 :name "Joe" :age 42}] :ids #{1}}
+            subquery [:db/id :account/status :account/created]
+            schema   {}]
+        (assertions
+          1 =>
+          "SELECT account.id as \":db/id\", account.status as \":account/status\",
+          account.created as \":account/created\"
+          FROM account WHERE account.user_id IN (1)")))))
