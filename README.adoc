@@ -1,4 +1,15 @@
 = Fulcro SQL
 
 This will be a library that can run Om Next graph queries against an SQL database to make it easier to build
-data-driven apps that need to use a relational database for the back-end. 
+data-driven apps that need to use a relational database for the back-end.
+
+== Development
+
+Running tests for development:
+
+1. Start a REPL
+2. Run `(test-suite)`
+3. Browse to http://localhost:8888/fulcro-spec-server-tests.html
+
+
+

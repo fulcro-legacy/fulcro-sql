@@ -3,7 +3,7 @@
     [fulcro-spec.selectors :as sel]
     [fulcro-spec.suite :as suite]))
 
-(suite/def-test-suite my-test-suite
+(suite/def-test-suite test-suite
   {:config       {:port 8888}
    :test-paths   ["src/test"]
    :source-paths ["src/main"]}
