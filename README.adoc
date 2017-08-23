@@ -5,11 +5,11 @@ general PostgreSQL database component is fairly solid as are the seeding and tes
 
 A utility library for working with SQL databases. It includes the following:
 
-- A `com.stuartsierra` component for starting, building a configurable connection pooling datasource,
-  and running migrations.
-- A `with-database` test wrapper, for easily writing integration tests, that manages the complete
+- A `com.stuartsierra` component for starting, building, connection pooling,
+  and schema migrations.
+- A `with-database` test wrapper for easily writing integration tests. It manages the complete
 lifecycle of a test database within each test.
-- Database seeding tools, useful for both testing, development, and production.
+- Database seeding tools with abstract ID support. Useful for testing, development, *and* production.
 - Tools that can convert the Om Next (Datomic pull query) syntax into an SQL query.
 
 Thus, it is useful for general SQL development (the graph utilities are relatively small), and
