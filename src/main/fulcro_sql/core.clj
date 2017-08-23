@@ -259,9 +259,9 @@
                        (get row pk))]
         (if update
           (do
-            (timbre/error "updating " row "at" pk pk-val)
+            (timbre/debug "updating " row "at" pk pk-val)
             (jdbc/update! db table real-row [(str (name pk) " = ?") pk-val]))
           (do
-            (timbre/error "inserting " real-row)
+            (timbre/debug "inserting " real-row)
             (jdbc/insert! db table real-row)))))
     tempid-map))
