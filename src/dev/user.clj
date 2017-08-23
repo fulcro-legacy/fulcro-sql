@@ -7,5 +7,5 @@
   {:config       {:port 8888}
    :test-paths   ["src/test"]
    :source-paths ["src/main"]}
-  {:available #{:focused}
+  {:available #{:focused :integration}
    :default   #{::sel/none :focused}})
