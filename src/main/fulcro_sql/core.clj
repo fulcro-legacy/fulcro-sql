@@ -45,16 +45,18 @@
 
 (defmethod table-for* :default
   [schema query]
-  (let [{:keys [om->sql]} schema
+  (let [{:keys [::om->sql]} schema
         nses (reduce (fn
                        ([] #{})
                        ([s p]
-                        (let [sql-prop (if (map? p) nil (get om->sql p p))
+                        (let [sql-prop (if (map? p)
+                                         (get om->sql (ffirst p) (ffirst p))
+                                         (get om->sql p p))
                               table-kw (some-> sql-prop namespace keyword)]
                           (cond
-                            (map? p) s
+                            (= :id sql-prop) s
                             (= :db/id sql-prop) s
-                            (and sql-prop table-kw) (conj s table-kw)
+                            table-kw (conj s table-kw)
                             :else s)))) #{} query)]
     (assert (= 1 (count nses)) (str "Could not determine a single table from the subquery " query))
     (sqlize schema (first nses))))
@@ -62,6 +64,7 @@
 (defn table-for
   "Scans the given Om query and tries to determine which table is to be used for the props within it."
   [schema query]
+  (assert (s/valid? ::schema schema) "Schema is valid")
   (table-for* schema query))
 
 (defn id-columns
@@ -72,23 +75,15 @@
     #{} pks))
 
 (defmulti column-spec
-  "Get the column query specification for a given om prop. The omprop will be converted to an SQL :table/col property
-  that may be a scalar value on `table` or a join. If it is a join, it will only return a value if the join has
-  data on the `table` implied (e.g. isn't a reverse FK reference). "
-  (fn [schema omprop] (get schema ::driver :default)))
+  "Get the database-specific column query specification for a given SQL prop."
+  (fn [schema sqlprop] (get schema ::driver :default)))
 
 (defmethod column-spec :default
-  [{:keys [::om->sql ::joins] :as schema} omprop]
-  (let [id-columns             (id-columns schema)
-        sqlprop                (sqlize schema (get om->sql omprop omprop))
-        join                   (get joins sqlprop)
-        join-source-is-row-id? (some->> join first (contains? id-columns) boolean)
-        join-col               (first join)
-        [sqltable column target] (if (seq join)
-                                   [(namespace join-col) (name join-col) sqlprop]
-                                   [(namespace sqlprop) (name sqlprop) omprop])
-        as-name                (str (namespace target) "/" (name target))]
-    (str sqltable "." column " AS \"" as-name "\"")))
+  [schema sqlprop]
+  (let [table   (namespace sqlprop)
+        col     (name sqlprop)
+        as-name (str (namespace sqlprop) "/" (name sqlprop))]
+    (str table "." col " AS \"" as-name "\"")))
 
 (s/def ::migrations (s/and vector? #(every? string? %)))
 (s/def ::hikaricp-config string?)
@@ -265,3 +260,44 @@
             (timbre/debug "inserting " real-row)
             (jdbc/insert! db table real-row)))))
     tempid-map))
+
+(defn query-element->sqlprop
+  [{:keys [::om->sql ::joins] :as schema} element]
+  (let [omprop                 (if (map? element) (ffirst element) element)
+        id-columns             (id-columns schema)
+        sqlprop                (sqlize schema (get om->sql omprop omprop))
+        join                   (get joins sqlprop)
+        join-source-is-row-id? (some->> join first (contains? id-columns) boolean)
+        join-col               (first join)
+        join-prop              (when join-col
+                                 (sqlize schema (get om->sql join-col join-col)))]
+    (cond
+      (= "id" (name sqlprop)) nil
+      join-prop join-prop
+      :else sqlprop)))
+
+(defn columns-for
+  "Returns an SQL-centric set of properties at the top level of the given graph query. It does not follow joins, but
+  does include any columns that would be necessary to process the given joins. It will always include the row ID."
+  [schema graph-query]
+  (assert (s/valid? ::schema schema) "Schema is valid")
+  (let [table  (table-for schema graph-query)
+        pk     (get-in schema [::pks table] :id)
+        id-col (keyword (name table) (name pk))]
+    (reduce
+      (fn [rv ele]
+        (if-let [prop (query-element->sqlprop schema ele)]
+          (conj rv prop)
+          rv)) #{id-col} graph-query)))
+
+(defn query-for [schema target-table om-query id-set]
+  (let [table            (or (table-for schema om-query) target-table)
+        columns          (columns-for schema om-query)
+        column-selectors (map #(column-spec schema %) columns)
+        selectors        (str/join "," column-selectors)
+        table-name       (name table)
+        ids              (str/join "," (map str id-set))
+        id-col           (str (name table) "." (name (get-in schema [::pks table] :id)))
+        sql              (str "SELECT " selectors " FROM " table-name " WHERE " id-col " IN (" ids ")")]
+    (assert (or (nil? target-table) (= target-table table)) "Target table mismatch!")
+    sql))

@@ -41,72 +41,15 @@ Steps:
    - If any of the subquery items are joins, recurse.
 
 "
-
   (timbre/set-level! :error)
   )
-
-(specification "Table Detection: `table-for`"
-  (let [schema {:om->sql {:thing/name    :sql_table/name
-                          :boo/blah      :sql_table/prop
-                          :the-thing/boo :the-table/bah}}]
-    (assertions
-      "Detects the correct table name if all of the properties agree"
-      (core/table-for schema [:account/name :account/status]) => :account
-      "Detects the correct table name if all of the properties agree, and there is also a :db/id"
-      (core/table-for schema [:db/id :account/name :account/status]) => :account
-      "Remaps known om->sql properties to ensure detection"
-      (core/table-for schema [:thing/name :boo/blah]) => :sql_table
-      "Throws an exception if a distinct table name cannot be resolved"
-      (core/table-for schema [:db/id :account/name :user/status]) =throws=> (AssertionError #"Could not determine a single")
-      "Ensures derived table names use underscores instead of hypens"
-      (core/table-for schema [:a-thing/name]) => :a_thing
-      (core/table-for schema [:the-thing/boo]) => :the_table
-      (core/table-for schema [:the-crazy-woods/a]) => :the_crazy_woods
-      "Joins do not contribute to detection"
-      (core/table-for schema [:account/a {:the-crazy-woods/a []}]) => :account
-      (core/table-for schema [:account/a {:user/name [:value]}]) => :account)))
-
-; one to one, and one-to-many, just specify the graph edge in either order
-;[:account/address_id :address/id]
-; SELECT address.id, account.address_id FROM address, account WHERE account.address_id = address.id
-; SELECT member.id, account.id FROM account, member WHERE account.id = member.account_id AND account.id IN (1, 2, 3)
-; join table involved? Just specify the path from end-to-end
-;[:invoice/line_item_id :invoice_items/line_item_id :invoice_items/item_id :item/id]
-
-(specification "Column Specification: `column-spec`"
-  (let [schema {::core/om->sql {:thing/name    :sql_table/name
-                                :boo/blah      :sql_table/prop
-                                :the-thing/boo :the-table/bah}
-                ; FROM AN SQL PERSPECTIVE...Not Om
-                ::core/pks     {:account :id :member :id :invoice :id :item :id}
-                ::core/joins   {
-                                :account/address [:account/address_id :address/id]
-                                :account/members [:account/id :member/account_id]
-                                :member/account  [:member/account_id :account/id]
-                                :invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
-                                :item/invoice    [:item/id :invoice_items/item_id :invoice_items/line_item_id :invoice/line_item_id]
-                                }}]
-    (assert (s/valid? ::core/schema schema) "Schema is valid")
-    (behavior "id-columns from schema"
-      (assertions "Gives back a set of :table/col keywords that represent the SQL database ID columns"
-        (core/id-columns schema) => #{:account/id :member/id :invoice/id :item/id}))
-    (assertions
-      "Converts an Om property to a proper column selector in SQL, with as AS clause of the Om property"
-      (core/column-spec schema :account/name) => "account.name AS \"account/name\""
-      (core/column-spec schema :thing/name) => "sql_table.name AS \"thing/name\""
-      (core/column-spec schema :the-thing/boo) => "the_table.bah AS \"the-thing/boo\""
-      "Joins contribute a column if the table has a join key."
-      (core/column-spec schema :account/address) => "account.address_id AS \"account/address\""
-      "Joins without a local join column contribute their PK instead"
-      (core/column-spec schema :account/members) => "account.id AS \"account/members\""
-      (core/column-spec schema :invoice/items) => "invoice.id AS \"invoice/items\""
-      (core/column-spec schema :item/invoice) => "item.id AS \"item/invoice\"")))
-
 (def test-database {:hikaricp-config "test.properties"
                     :migrations      ["classpath:migrations/test"]})
 
-(def test-schema {::core/om->sql {}
-                  ::core/joins   {:account/members [:account/id :member/account_id]}
+(def test-schema {::core/om->sql {:person/name    :member/name
+                                  :person/account :member/account_id}
+                  ::core/joins   {:account/members [:account/id :member/account_id]
+                                  :member/account  [:member/account_id :account/id]}
                   ::core/pks     {:account :id
                                   :member  :id}})
 
@@ -118,7 +61,7 @@ Steps:
         (assertions
           (:name row) => "Tony")))))
 
-(specification "next-id"
+(specification "next-id" :integration
   (behavior "Pulls a monotonically increasing ID from the database"
     (with-database [db test-database]
       (let [a (core/next-id db test-schema :account)
@@ -130,7 +73,7 @@ Steps:
           "IDs are increasing"
           (> b a) => true)))))
 
-(specification "seed!"
+(specification "seed!" :integration
   (with-database [db test-database]
     (let [rows     [(core/seed-row :account {:id :id/joe :name "Joe"})
                     (core/seed-row :member {:id :id/sam :account_id :id/joe :name "Sam"})
@@ -146,14 +89,86 @@ Steps:
         (:name real-joe) => "Joe"
         (:last_edited_by real-joe) => sam))))
 
-(comment
-  (specification "Om Property-only Query"
-    (behavior "Given a root set of IDs and an Om query for properties (no joins)"
-      (let [root-set {:rows [{:id 1 :name "Joe" :age 42}] :ids #{1}}
-            subquery [:db/id :account/status :account/created]
-            schema   {}]
-        (assertions
-          1 =>
-          "SELECT account.id as \":db/id\", account.status as \":account/status\",
-          account.created as \":account/created\"
-          FROM account WHERE account.user_id IN (1)")))))
+
+
+
+(specification "Table Detection: `table-for`" :focused
+  (let [schema {::core/pks     {}
+                ::core/joins   {}
+                ::core/om->sql {:thing/name    :sql_table/name
+                                :boo/blah      :sql_table/prop
+                                :the-thing/boo :the-table/bah}}]
+    (assertions
+      ":id and :db/id are ignored"
+      (core/table-for schema [:account/name :db/id :id]) => :account
+      "Detects the correct table name if all of the properties agree"
+      (core/table-for schema [:account/name :account/status]) => :account
+      "Detects the correct table name if all of the properties agree, and there is also a :db/id"
+      (core/table-for schema [:db/id :account/name :account/status]) => :account
+      "Remaps known om->sql properties to ensure detection"
+      (core/table-for schema [:thing/name :boo/blah]) => :sql_table
+      "Throws an exception if a distinct table name cannot be resolved"
+      (core/table-for schema [:db/id :account/name :user/status]) =throws=> (AssertionError #"Could not determine a single")
+      "Ensures derived table names use underscores instead of hypens"
+      (core/table-for schema [:a-thing/name]) => :a_thing
+      (core/table-for schema [:the-thing/boo]) => :the_table
+      (core/table-for schema [:the-crazy-woods/a]) => :the_crazy_woods
+      "Column remaps are done before table detection"
+      (core/table-for test-schema [:person/name]) => :member
+      "Joins can determine table via the join name"
+      (core/table-for test-schema [:db/id {:account/members [:db/id :member/name]}]) => :account
+      (core/table-for schema [{:the-crazy-woods/a []}]) => :the_crazy_woods
+      (core/table-for schema [{:user/name [:value]}]) => :user)))
+
+(def sample-schema
+  {::core/om->sql {:thing/name    :sql_table/name
+                   :boo/blah      :sql_table/prop
+                   :the-thing/boo :the-table/bah}
+   ; FROM AN SQL PERSPECTIVE...Not Om
+   ::core/pks     {:account :id :member :id :invoice :id :item :id}
+   ::core/joins   {
+                   :account/address [:account/address_id :address/id]
+                   :account/members [:account/id :member/account_id]
+                   :member/account  [:member/account_id :account/id]
+                   :invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
+                   :item/invoice    [:item/id :invoice_items/item_id :invoice_items/line_item_id :invoice/line_item_id]}})
+
+(specification "columns-for" :focused
+  (assertions
+    "Returns a set"
+    (core/columns-for test-schema [:t/c]) =fn=> set?
+    "Resolves the ID column via the derived table name"
+    (core/columns-for test-schema [:db/id :person/name :person/account]) => #{:member/id :member/name :member/account_id})
+  (assert (s/valid? ::core/schema sample-schema) "Schema is valid")
+  (behavior "id-columns from schema"
+    (assertions "Gives back a set of :table/col keywords that represent the SQL database ID columns"
+      (core/id-columns sample-schema) => #{:account/id :member/id :invoice/id :item/id}))
+  (assertions
+    "Converts an Om property to a proper column selector in SQL, with as AS clause of the Om property"
+    (core/columns-for sample-schema [:thing/name]) => #{:sql_table/name :sql_table/id}
+    (core/columns-for sample-schema [:the-thing/boo]) => #{:the_table/bah :the_table/id}
+    "Joins contribute a column if the table has a join key."
+    (core/columns-for sample-schema [:account/address]) => #{:account/address_id :account/id}
+    (core/columns-for test-schema [:db/id {:account/members [:db/id :member/name]}]) => #{:account/id}
+    "Joins without a local join column contribute their PK instead"
+    (core/columns-for sample-schema [:account/members]) => #{:account/id}
+    (core/columns-for sample-schema [:invoice/items]) => #{:invoice/id}
+    (core/columns-for sample-schema [:item/invoice]) => #{:item/id}))
+
+(specification "Column Specification: `column-spec`"
+  (assertions
+    "Translates an sqlprop to an SQL selector"
+    (core/column-spec sample-schema :account/name) => "account.name AS \"account/name\""))
+
+(specification "Single-level query-for query generation"
+  (assertions
+    "Generates a base non-recursive SQL query"
+    (core/query-for test-schema :account [:db/id {:account/members [:db/id :member/name]}] #{1 5 7 9}) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (7,1,9,5)"
+    "Derives table name if none is supplied when possible"
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] #{1 5 7 9}) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (7,1,9,5)"
+    (core/query-for test-schema nil [:db/id] #{1 5 7 9}) =throws=> (AssertionError #"Could not determine")
+    "Refuses to generate a query if the specified table does not agree with the query"
+    (core/query-for test-schema :member [:db/id {:account/members [:db/id :member/name]}] #{1 5 7 9}) =throws=> (java.lang.AssertionError #"Target.*mismatch")
+    "Properly generates a comma-separated list of selectors"
+    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.name AS \"boo/name\",boo.id AS \"boo/id\",boo.bah AS \"boo/bah\" FROM boo WHERE boo.id IN (3)"
+    ))
