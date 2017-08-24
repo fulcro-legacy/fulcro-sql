@@ -41,17 +41,22 @@
   [schema kw]
   (sqlize* schema kw))
 
+(defn sqlprop
+  "Derive an sqlprop from an om query element (prop or join)"
+  [{:keys [::om->sql] :as schema} p]
+  (sqlize schema
+    (if (map? p)
+      (get om->sql (ffirst p) (ffirst p))
+      (get om->sql p p))))
+
 (defmulti table-for* (fn [schema query] (get schema :driver :default)))
 
 (defmethod table-for* :default
   [schema query]
-  (let [{:keys [::om->sql]} schema
-        nses (reduce (fn
+  (let [nses (reduce (fn
                        ([] #{})
                        ([s p]
-                        (let [sql-prop (if (map? p)
-                                         (get om->sql (ffirst p) (ffirst p))
-                                         (get om->sql p p))
+                        (let [sql-prop (sqlprop schema p)
                               table-kw (some-> sql-prop namespace keyword)]
                           (cond
                             (= :id sql-prop) s
@@ -223,6 +228,8 @@
 (defn pk-column [schema table]
   (get-in schema [::pks table] :id))
 
+
+
 (defn seed!
   "Seed the given seed-row and seed-update items into the given database. Returns a map whose values will be the
   keyword placeholders for generated PK ids, and whose values are the real numeric generated ID:
@@ -262,15 +269,14 @@
     tempid-map))
 
 (defn query-element->sqlprop
-  [{:keys [::om->sql ::joins] :as schema} element]
+  [{:keys [::joins] :as schema} element]
   (let [omprop                 (if (map? element) (ffirst element) element)
         id-columns             (id-columns schema)
-        sqlprop                (sqlize schema (get om->sql omprop omprop))
+        sqlprop                (sqlprop schema omprop)
         join                   (get joins sqlprop)
         join-source-is-row-id? (some->> join first (contains? id-columns) boolean)
         join-col               (first join)
-        join-prop              (when join-col
-                                 (sqlize schema (get om->sql join-col join-col)))]
+        join-prop              (when join-col (sqlprop schema join-col))]
     (cond
       (= "id" (name sqlprop)) nil
       join-prop join-prop
@@ -290,14 +296,74 @@
           (conj rv prop)
           rv)) #{id-col} graph-query)))
 
-(defn query-for [schema target-table om-query id-set]
-  (let [table            (or (table-for schema om-query) target-table)
-        columns          (columns-for schema om-query)
-        column-selectors (map #(column-spec schema %) columns)
-        selectors        (str/join "," column-selectors)
-        table-name       (name table)
-        ids              (str/join "," (map str id-set))
-        id-col           (str (name table) "." (name (get-in schema [::pks table] :id)))
-        sql              (str "SELECT " selectors " FROM " table-name " WHERE " id-col " IN (" ids ")")]
-    (assert (or (nil? target-table) (= target-table table)) "Target table mismatch!")
-    sql))
+(defn str-idcol
+  "Returns the SQL string for the ID column of the given (keyword) table. E.g. :account -> account.id"
+  [schema table]
+  (str (name table) "." (name (pk-column schema table))))
+
+(defn str-col
+  "Returns the SQL string for the given sqlprop. E.g. :a/b -> a.b"
+  [prop]
+  (str (namespace prop) "." (name prop)))
+
+(defn query-for
+  ([schema target-table om-query id-set]
+   (query-for schema target-table nil om-query id-set))
+  ([schema target-table join-col om-query id-set]
+   (let [table            (or (table-for schema om-query) target-table)
+         columns          (columns-for schema om-query)
+         column-selectors (map #(column-spec schema %) columns)
+         selectors        (str/join "," column-selectors)
+         table-name       (name table)
+         ids              (str/join "," (map str id-set))
+         id-col           (if join-col
+                            (str-col join-col)
+                            (str-idcol schema table))
+         sql              (str "SELECT " selectors " FROM " table-name " WHERE " id-col " IN (" ids ")")]
+     (assert (or (nil? target-table) (= target-table table)) "Target table mismatch!")
+     sql)))
+
+(defn target-table-for-join
+  "Given an SQL prop that is being used in a join, returns the target table for that join that contains the desired data"
+  [{:keys [::joins] :as schema} sqlprop]
+  (some-> sqlprop joins last namespace keyword))
+
+(defn query-for-join
+  "Given an sqlprop on a join and the rows retrieved for the level at the join, return a query that can obtain
+  the rows for the specified join. "
+  [{:keys [::pks ::joins] :as schema} omjoin rows]
+  (let [sqlprop           (sqlprop schema (ffirst omjoin))
+        om-query          (-> omjoin vals first)
+        source-table      (keyword (namespace sqlprop))
+        join-sequence     (get joins sqlprop)
+        source-pk         (keyword (name source-table) (name (get pks source-table :id)))
+        pk-set            (into #{} (map #(get % source-pk) rows))
+        join-start        (first join-sequence)
+        join-start-table  (keyword (namespace join-start))
+        join-target       (last join-sequence)
+        std-one-to-many?  (and (= 2 (count join-sequence)) (= join-start source-pk))
+        std-one-to-one?   (and (= 2 (count join-sequence))
+                            (not= join-start source-pk)
+                            (= join-start-table source-table))
+        std-many-to-many? (and (= 4 (count join-sequence)))]
+    (assert (contains? joins sqlprop) "Join is described")
+    (cond
+      std-one-to-many? (query-for schema nil join-target om-query pk-set)
+      std-one-to-one? (let [id-set (into #{} (map join-start rows))]
+                        (query-for schema nil join-target om-query id-set))
+      std-many-to-many? (let [left-table       (-> join-sequence second namespace)
+                              right-table      (-> join-sequence last namespace)
+                              col-left         (-> join-sequence (nth 2) str-col)
+                              col-right        (-> join-sequence (nth 3) str-col)
+                              filter-col       (-> join-sequence second str-col)
+                              columns          (columns-for schema om-query)
+                              column-selectors (map #(column-spec schema %) columns)
+                              column-selectors (conj column-selectors (column-spec schema (second join-sequence)))
+                              selectors        (str/join "," column-selectors)
+                              from-clause      (str "FROM " left-table " INNER JOIN " right-table " ON "
+                                                 col-left " = " col-right)
+                              ids              (str/join "," pk-set)
+                              sql              (str "SELECT " selectors " " from-clause " WHERE " filter-col " IN (" ids ")")]
+                          sql)
+
+      )))

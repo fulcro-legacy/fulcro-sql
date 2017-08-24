@@ -8,41 +8,6 @@
     [clojure.java.jdbc :as jdbc]
     [taoensso.timbre :as timbre]))
 
-(comment
-  "
-A given Om query running through the parser will
-have a root property (that is either a property of a join). The
-entry point of the processing will need to determine from that (and
-its parameters) how to obtain the root set of entities of
-interest, and what their root ID set is.
-
-At that point, the join processing can take over. Using a configured
-schema it can walk any of the following kinds of SQL Schema joins:
-
-1. One to one: ID of foreign row is on the table of the root set
-2. One to one: ID of root set row is on the foreign table
-3. One to many: Root set ID will appear in a column on foreign table
-4. Many to many: Root set ID will appear on a join table, which in
-turn will have a column pointing to the foreign row
-
-The scheme we'd like to use would issue the minimal number of queries
-for a given graph walk.
-
-Steps:
-
-1. Your code generates the root set from a property key and params
-  - Root set is a data structure with the shape {:rows [] :ids #{}}
-2. Subquery is processed:
-   - Derive what table the subquery is hitting
-   - Generate the column list for all properties and join (ids) that exist
-     on that table, based on the schema.
-   - Issue a SELECT ... WHERE ... IN ... to obtain all of the rows related
-   to the root set.
-   - If any of the subquery items are joins, recurse.
-
-"
-  (timbre/set-level! :error)
-  )
 (def test-database {:hikaricp-config "test.properties"
                     :migrations      ["classpath:migrations/test"]})
 
@@ -92,7 +57,7 @@ Steps:
 
 
 
-(specification "Table Detection: `table-for`" :focused
+(specification "Table Detection: `table-for`"
   (let [schema {::core/pks     {}
                 ::core/joins   {}
                 ::core/om->sql {:thing/name    :sql_table/name
@@ -133,7 +98,7 @@ Steps:
                    :invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
                    :item/invoice    [:item/id :invoice_items/item_id :invoice_items/line_item_id :invoice/line_item_id]}})
 
-(specification "columns-for" :focused
+(specification "columns-for"
   (assertions
     "Returns a set"
     (core/columns-for test-schema [:t/c]) =fn=> set?
@@ -170,5 +135,28 @@ Steps:
     "Refuses to generate a query if the specified table does not agree with the query"
     (core/query-for test-schema :member [:db/id {:account/members [:db/id :member/name]}] #{1 5 7 9}) =throws=> (java.lang.AssertionError #"Target.*mismatch")
     "Properly generates a comma-separated list of selectors"
-    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.name AS \"boo/name\",boo.id AS \"boo/id\",boo.bah AS \"boo/bah\" FROM boo WHERE boo.id IN (3)"
+    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.name AS \"boo/name\",boo.id AS \"boo/id\",boo.bah AS \"boo/bah\" FROM boo WHERE boo.id IN (3)"))
+
+(specification "target-table-for-join"
+  (assertions
+    "finds the table name where data will come from for a join"
+    (core/target-table-for-join sample-schema :invoice/items) => :item
+    (core/target-table-for-join sample-schema :account/members) => :member
+    "Returns nil when the columns is not a registered join"
+    (core/target-table-for-join sample-schema :account/id) => nil))
+
+(specification "query-for-join" :focused
+  (assertions
+    "Can follow a standard one-to-many where the FK is on the target table."
+    (core/query-for-join test-schema {:account/members [:db/id :member/name]} [{:account/id 1} {:account/id 2}])
+    => "SELECT member.name AS \"member/name\",member.id AS \"member/id\" FROM member WHERE member.account_id IN (1,2)"
+    "Can follow a standard one-to-one where the FK is on the source table to the target ID."
+    (core/query-for-join sample-schema {:account/address [:db/id :address/street]} [{:account/address_id 8} {:account/address_id 11}])
+    => "SELECT address.id AS \"address/id\",address.street AS \"address/street\" FROM address WHERE address.id IN (11,8)"
+
+    ;:invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
+    "Can follow a standard many-to-many which will include the source table ID for join-resolution"
+    (core/query-for-join sample-schema {:invoice/items [:db/id :item/amount]} [{:invoice/id 3} {:invoice/id 5}])
+    => "SELECT invoice_items.invoice_id AS \"invoice_items/invoice_id\",item.id AS \"item/id\",item.amount AS \"item/amount\" FROM invoice_items INNER JOIN item ON invoice_items.item_id = item.id WHERE invoice_items.invoice_id IN (3,5)"
     ))
+
