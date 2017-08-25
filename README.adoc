@@ -18,11 +18,15 @@ is particularly well-suited when you need to use SQL databases from Fulcro or Om
 Connection pooling is provided by http://brettwooldridge.github.io/HikariCP/[HikariCP].
 Migrations are provided by http://flywaydb.org/[Flyway].
 
-image::https://img.shields.io/clojars/v/fulcrologic/fulcro-sql.svg[link=https://clojars.org/fulcrologic/fulcro-sql]
-
 == Usage
 
-In order to use this library, there is a little configuration that needs to be done:
+Add `fulcro-sql` to your dependencies:
+
+image::https://img.shields.io/clojars/v/fulcrologic/fulcro-sql.svg[link=https://clojars.org/fulcrologic/fulcro-sql]
+
+Then install a database manager as a component in your web server and inject it into any code that
+needs to run graph queries against your SQL database. See <<integrating,Integrating with a Fulcro Server>>
+ below.
 
 === Configuring the SQLDatabaseManager
 
@@ -119,9 +123,74 @@ database. This allows you to use whatever UI properties you wish, and map them t
 location in the database.
 - `::core/joins` - A map whose key is an graph query property that is obtained by following an SQL join, and
 whose value is a vector of SQL `:table/col` keywords that describe (in order) the tables and columns
-that have to be traversed to resolve the join. (WORK IN PROGRESS. MAY CHANGE)
+that have to be traversed to resolve the join.
 - `::core/pks` - A map whose keys are SQL table names (as keywords) and the columns that represent the PK for that table.
 These default to `:id`, so technically you only need them if you used something else.
+
+==== Support for to-one:
+
+When specifying the join sequence, simply wrap it with a call to `(core/to-one ...)`:
+
+```
+(def schema { ...
+              ::core/joins {:account/settings (core/to-one [:account/settings_id :settings/id])}})
+```
+
+would describe a to-one join from the following SQL schema:
+
+```
+CREATE TABLE settings (id serial primary key, ...);
+CREATE TABLE account (settings_id integer references settings(id), ...);
+```
+
+You can include both directions in the joins:
+
+```
+(def schema { ...
+              ::core/joins {:account/settings (core/to-one [:account/settings_id :settings/id])
+                            :settings/account (core/to-one [:settings/id :account/settings_id])}})
+```
+
+==== Support for to-many:
+
+To-many is implied by default, but you can make it explicity with a call to `(core/to-many join-seq)`.
+
+==== Support for many-to-many:
+
+WARNING: Support for join tables is in progress. THIS DOES NOT WORK YET.
+
+Many-to-many joins are described with four table/column keywords in the join sequence. For example,
+say you had the schema:
+
+```
+CREATE TABLE invoice (
+  id           SERIAL PRIMARY KEY,
+  invoice_date TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE TABLE item (
+  id   SERIAL PRIMARY KEY,
+  name TEXT NOT NULL
+);
+
+CREATE TABLE invoice_items (
+  id         SERIAL PRIMARY KEY,
+  quantity   SMALLINT NOT NULL,
+  invoice_id INTEGER  NOT NULL REFERENCES invoice (id),
+  item_id    INTEGER  NOT NULL REFERENCES item (id)
+);
+```
+
+You would describe the possible joins of interest as:
+
+```
+(def schema { ...
+              ::core/joins { :invoice/items    (core/to-many [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id])
+                             :item/invoices    (core/to-many [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id])}}})
+```
+
+This would allow you to issued the graph-query `[{:invoice/items [:item/name]}]` or `[{:item/invoices [:invoice/invoice-date]}]`
+relative to an invoice in the former, and an invoice item in the latter.
 
 === Configuring The Connection Pooling
 
@@ -216,7 +285,7 @@ The bound variable (`db`) is a simple map, containing nothing but `:datasource`.
 JDBC `DataSource`, and having it in the map makes it compatible with the `clojure.java.jdbc` library
 for convenience.
 
-=== Integrating With a Fulcro Server
+=== Integrating With a Fulcro Server [[integrating,Integrating with Fulcro Server]]
 
 Fulcro comes with a config component that lays out configuration in a way that is compatible with
 the DatabaseManager component(s) in this library. Remember that the database manager can
@@ -238,6 +307,21 @@ the key `:datasource` whose value is a connection-pooled JDBC data source:
   (action [{:keys [dbs]}]
     (let [dbspec (fulcro-sql.core/get-dbspec dbs :test)]
       (jdbc/insert! dbspec ...))))
+```
+
+Running a query should be relatively easy if your schema is correct. Your query code will
+need to derive a "root set". A root set is simply the IDs of the entities that should
+root the graph traversal. You might figure this out from query `params`, the user's session,
+a special request cookie, or some other criteria.
+
+TODO: Test the following for typos:
+
+```
+(defquery-root :accounts
+  (value [{:keys [dbs query]} params]
+    (let [dbspec (core/get-dbspec dbs :test)
+          account-ids-of-interest #{1 2}]
+      (core/run-query dbspec schema :account/id account-ids-of-interest))))
 ```
 
 === Logging
