@@ -10,7 +10,7 @@ A utility library for working with SQL databases. It includes the following:
 - A `with-database` test wrapper for easily writing integration tests. It manages the complete
 lifecycle of a test database within each test.
 - Database seeding tools with abstract ID support. Useful for testing, development, *and* production.
-- Tools that can convert the Om Next (Datomic pull query) syntax into an SQL query.
+- Tools that can convert Om Next query syntax into an SQL query.
 
 Thus, it is useful for general SQL development (the graph utilities are relatively small), and
 is particularly well-suited when you need to use SQL databases from Fulcro or Om Next.
@@ -107,17 +107,17 @@ database's metadata.
 (ns schema
   (:require [fulcr-sql.core :as core]))
 
-(def schema {::core/om->sql {}
+(def schema {::core/graph->sql {}
              ::core/joins   {:account/members [:account/id :member/account_id]}
              ::core/pks     {:account :id
                              :member  :id}})
 ```
 
-- `::core/om->sql` - A map from Om property names to SQL. The SQL naming *must* follow the convention
+- `::core/graph->sql` - A map from the graph query property names to SQL. The SQL naming *must* follow the convention
 `:table/column`, where the `table` and `column` portions exactly match a table and column name in your
-database. This allows you to use whatever UI Om properties you wish, and map them to their correct
+database. This allows you to use whatever UI properties you wish, and map them to their correct
 location in the database.
-- `::core/joins` - A map whose key is an Om property that is obtained by following an SQL join, and
+- `::core/joins` - A map whose key is an graph query property that is obtained by following an SQL join, and
 whose value is a vector of SQL `:table/col` keywords that describe (in order) the tables and columns
 that have to be traversed to resolve the join. (WORK IN PROGRESS. MAY CHANGE)
 - `::core/pks` - A map whose keys are SQL table names (as keywords) and the columns that represent the PK for that table.

@@ -13,7 +13,7 @@
 (def test-database {:hikaricp-config "test.properties"
                     :migrations      ["classpath:migrations/test"]})
 
-(def test-schema {::core/om->sql {:person/name    :member/name
+(def test-schema {::core/graph->sql {:person/name    :member/name
                                   :person/account :member/account_id}
                   ::core/joins   {:account/members  (core/to-many [:account/id :member/account_id])
                                   :member/account   (core/to-one [:member/account_id :account/id])
@@ -62,7 +62,7 @@
 (specification "Table Detection: `table-for`"
   (let [schema {::core/pks     {}
                 ::core/joins   {}
-                ::core/om->sql {:thing/name    :sql_table/name
+                ::core/graph->sql {:thing/name    :sql_table/name
                                 :boo/blah      :sql_table/prop
                                 :the-thing/boo :the-table/bah}}]
     (assertions
@@ -72,7 +72,7 @@
       (core/table-for schema [:account/name :account/status]) => :account
       "Detects the correct table name if all of the properties agree, and there is also a :db/id"
       (core/table-for schema [:db/id :account/name :account/status]) => :account
-      "Remaps known om->sql properties to ensure detection"
+      "Remaps known graph->sql properties to ensure detection"
       (core/table-for schema [:thing/name :boo/blah]) => :sql_table
       "Throws an exception if a distinct table name cannot be resolved"
       (core/table-for schema [:db/id :account/name :user/status]) =throws=> (AssertionError #"Could not determine a single")
@@ -88,7 +88,7 @@
       (core/table-for schema [{:user/name [:value]}]) => :user)))
 
 (def sample-schema
-  {::core/om->sql {:thing/name    :sql_table/name
+  {::core/graph->sql {:thing/name    :sql_table/name
                    :boo/blah      :sql_table/prop
                    :the-thing/boo :the-table/bah}
    ; FROM AN SQL PERSPECTIVE...Not Om
@@ -127,17 +127,26 @@
     "Translates an sqlprop to an SQL selector"
     (core/column-spec sample-schema :account/name) => "account.name AS \"account/name\""))
 
+(specification "sqlprop-for-join"
+  (assertions
+    "pulls the ID column if it is a FK back-reference join"
+    (core/sqlprop-for-join test-schema :account {:account/members [:db/id :member/name]}) => :account/id
+    (core/sqlprop-for-join test-schema :account {:account/invoices [:db/id :invoice/created_on]}) => :account/id
+    "Pulls the correct FK column when edge goes from the given table"
+    (core/sqlprop-for-join test-schema :member {:member/account [:db/id :account/name]}) => :member/account_id
+    (core/sqlprop-for-join test-schema :invoice {:invoice/account [:db/id :account/name]}) => :invoice/account_id))
+
 (specification "Single-level query-for query generation"
   (assertions
     "Generates a base non-recursive SQL query"
-    (core/query-for test-schema :account [:db/id {:account/members [:db/id :member/name]}] #{1 5 7 9}) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (7,1,9,5)"
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
+    (core/query-for test-schema :account/members [:db/id :member/name] (sorted-set 1 5)) => "SELECT member.id AS \"member/id\",member.name AS \"member/name\" FROM member WHERE member.account_id IN (1,5)"
     "Derives table name if none is supplied when possible"
-    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] #{1 5 7 9}) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (7,1,9,5)"
-    (core/query-for test-schema nil [:db/id] #{1 5 7 9}) =throws=> (AssertionError #"Could not determine")
-    "Refuses to generate a query if the specified table does not agree with the query"
-    (core/query-for test-schema :member [:db/id {:account/members [:db/id :member/name]}] #{1 5 7 9}) =throws=> (java.lang.AssertionError #"Target.*mismatch")
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
+    (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")
     "Properly generates a comma-separated list of selectors"
-    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.name AS \"boo/name\",boo.id AS \"boo/id\",boo.bah AS \"boo/bah\" FROM boo WHERE boo.id IN (3)"))
+    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.bah AS \"boo/bah\",boo.id AS \"boo/id\",boo.name AS \"boo/name\" FROM boo WHERE boo.id IN (3)"
+    ))
 
 (specification "target-table-for-join"
   (assertions
@@ -147,21 +156,21 @@
     "Returns nil when the columns is not a registered join"
     (core/target-table-for-join sample-schema :account/id) => nil))
 
-(specification "query-for-join"
-  (assertions
-    "Can follow a standard one-to-many where the FK is on the target table."
-    (first (core/query-for-join test-schema {:account/members [:db/id :member/name]} [{:account/id 1} {:account/id 2}]))
-    => "SELECT member.account_id AS \"member/account_id\",member.name AS \"member/name\",member.id AS \"member/id\" FROM member WHERE member.account_id IN (1,2)"
-    "Can follow a standard one-to-one where the FK is on the source table to the target ID."
-    (first (core/query-for-join sample-schema {:account/address [:db/id :address/street]} [{:account/address_id 8} {:account/address_id 11}]))
-    => "SELECT address.id AS \"address/id\",address.street AS \"address/street\" FROM address WHERE address.id IN (11,8)"
+#_(specification "query-for-join"
+    (assertions
+      "Can follow a standard one-to-many where the FK is on the target table."
+      (first (core/query-for-join test-schema {:account/members [:db/id :member/name]} [{:account/id 1} {:account/id 2}]))
+      => "SELECT member.account_id AS \"member/account_id\",member.name AS \"member/name\",member.id AS \"member/id\" FROM member WHERE member.account_id IN (1,2)"
+      "Can follow a standard one-to-one where the FK is on the source table to the target ID."
+      (first (core/query-for-join sample-schema {:account/address [:db/id :address/street]} [{:account/address_id 8} {:account/address_id 11}]))
+      => "SELECT address.id AS \"address/id\",address.street AS \"address/street\" FROM address WHERE address.id IN (11,8)"
 
-    ;:invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
-    "Can follow a standard many-to-many which will include the source table ID for join-resolution"
-    (first (core/query-for-join sample-schema {:invoice/items [:db/id :item/amount]} [{:invoice/id 3} {:invoice/id 5}]))
-    => "SELECT invoice_items.invoice_id AS \"invoice_items/invoice_id\",item.id AS \"item/id\",item.amount AS \"item/amount\" FROM invoice_items INNER JOIN item ON invoice_items.item_id = item.id WHERE invoice_items.invoice_id IN (3,5)"))
+      ;:invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
+      "Can follow a standard many-to-many which will include the source table ID for join-resolution"
+      (first (core/query-for-join sample-schema {:invoice/items [:db/id :item/amount]} [{:invoice/id 3} {:invoice/id 5}]))
+      => "SELECT invoice_items.invoice_id AS \"invoice_items/invoice_id\",item.id AS \"item/id\",item.amount AS \"item/amount\" FROM invoice_items INNER JOIN item ON invoice_items.item_id = item.id WHERE invoice_items.invoice_id IN (3,5)"))
 
-#_(def test-schema {::core/om->sql {:person/name    :member/name
+#_(def test-schema {::core/graph->sql {:person/name    :member/name
                                     :person/account :member/account_id}
                     ::core/joins   {:account/members  [:account/id :member/account_id]
                                     :member/account   [:member/account_id :account/id]
@@ -170,9 +179,27 @@
                                     :invoice/items    [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
                                     :item/invoice     [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id]}
                     ::core/pks     {}})
+(def pretend-results
+  {:account       [{:account/id :id/joe :account/name "Joe"}]
+   :invoice       [{:invoice/id :id/invoice-1 :invoice/account_id :id/joe :invoice/invoice_date (tm/date-time 2017 03 04)}
+                   {:invoice/id :id/invoice-2 :invoice/account_id :id/joe :invoice/invoice_date (tm/date-time 2016 01 02)}]
+   :item          [{:item/id :id/gadget :item/name "gadget"}
+                   {:item/id :id/widget :item/name "widget"}
+                   {:item/id :id/spanner :item/name "spanner"}]
+   :invoice_items [{:invoice_items/id :join-row-1 :invoice_items/invoice_id :id/invoice-1 :invoice_items/item_id :id/gadget :invoice_items/quantity 2}
+                   {:invoice_items/id :join-row-2 :invoice_items/invoice_id :id/invoice-2 :invoice_items/item_id :id/widget :invoice_items/quantity 8}
+                   {:invoice_items/id :join-row-3 :invoice_items/invoice_id :id/invoice-2 :invoice_items/item_id :id/spanner :invoice_items/quantity 1}
+                   {:invoice_items/id :join-row-4 :invoice_items/invoice_id :id/invoice-2 :invoice_items/item_id :id/gadget :invoice_items/quantity 5}]})
+
+; step 1: query is [:db/id :account/name {:account/invoices [...]}]
+; step 1a: generate SQL with SQL props
+; step 1b: account rows come back
+; step 2: for each join
+;   results = recurse with join-prop from (2), subquery for (2), and root set from (1b). Determine root set by (first join-sequence)
+; step 2a: group results by (second join-sequence) (the foreign table's root set id column)
+; step 2b: for each row from (1), join the correct group from (2a) to join prop of (2)
 
 (def test-rows [(core/seed-row :account {:id :id/joe :name "Joe"})
-                (core/seed-row :member {:id :id/sam :name "Sam" :account_id :id/joe})
                 (core/seed-row :invoice {:id :id/invoice-1 :account_id :id/joe :invoice_date (tm/date-time 2017 03 04)})
                 (core/seed-row :invoice {:id :id/invoice-2 :account_id :id/joe :invoice_date (tm/date-time 2016 01 02)})
                 (core/seed-row :item {:id :id/gadget :name "gadget"})
@@ -197,6 +224,6 @@
                                                                                      {:item/id gadget :item/name "gadget"}]}]}
           root-set        #{joe}
           source-table    :account]
-      (assertions
-        (core/run-query db test-schema :to-one :account #{joe} query) => expected-result))))
+      #_(assertions
+          (core/run-query db test-schema :to-one :account #{joe} query) => expected-result))))
 
