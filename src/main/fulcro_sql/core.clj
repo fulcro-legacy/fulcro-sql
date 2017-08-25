@@ -2,11 +2,14 @@
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.java.jdbc :as jdbc]
+            [clojure.pprint :refer [pprint]]
             [taoensso.timbre :as timbre]
             [clojure.spec.alpha :as s]
             [com.stuartsierra.component :as component]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.set :as set]
+            [om.next :as om])
   (:import (org.flywaydb.core Flyway)
            (com.zaxxer.hikari HikariConfig HikariDataSource)
            (java.util Properties)
@@ -20,8 +23,8 @@
                #(every? keyword? (keys %))
                #(every? keyword? (vals %))))
 (s/def ::graph->sql (s/and map?
-                   #(every? keyword? (keys %))
-                   #(every? keyword? (vals %))))
+                      #(every? keyword? (keys %))
+                      #(every? keyword? (vals %))))
 
 (s/def ::schema (s/keys
                   :req [::pks ::graph->sql ::joins]
@@ -333,12 +336,13 @@
          join-cols-to-include (->> graph-query
                                 (filter map?)
                                 (keep (partial sqlprop-for-join schema table)))
+         sql-join-column      (second (get joins graph-join-prop))
          columns              (apply sorted-set (concat (columns-for schema graph-query) join-cols-to-include))
+         columns              (if sql-join-column (conj columns sql-join-column) columns)
          column-selectors     (map #(column-spec schema %) columns)
          selectors            (str/join "," column-selectors)
          table-name           (name table)
-         ids                  (str/join "," (map str id-set))
-         sql-join-column      (last (get joins graph-join-prop))
+         ids                  (str/join "," (map str (keep identity id-set)))
          id-col               (if sql-join-column
                                 (str-col sql-join-column)
                                 (str-idcol schema table))
@@ -355,7 +359,7 @@
     the rows for the specified join."
     [{:keys [::pks ::joins] :as schema} omjoin rows]
     (let [sqlprop           (omprop->sqlprop schema (ffirst omjoin))
-          graph-query          (-> omjoin vals first)
+          graph-query       (-> omjoin vals first)
           source-table      (keyword (namespace sqlprop))
           join-sequence     (get joins sqlprop)
           source-pk         (keyword (name source-table) (name (get pks source-table :id)))
@@ -437,13 +441,50 @@
         (first result-rows)
         (vec result-rows))))
 
-; step 1: query is [:db/id :account/name {:account/invoices [...]}]
-; step 1a: generate SQL with SQL props
-; step 1b: account rows come back
-; step 2: for each join
-;   results = recurse with join-prop from (2), subquery for (2), and root set from (1b). Determine root set by (first join-sequence)
-; step 2a: group results by (second join-sequence) (the foreign table's root set id column)
-; step 2b: for each row from (1), join the correct group from (2a) to join prop of (2)
+(defn join-key [join] (ffirst join))
+(defn join-query [join] (-> join first second))
+
+(defn- run-query*
+  [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
+  (assert (s/valid? ::schema schema) "schema is valid")
+  (let [is-join?                 (contains? joins join-or-id-column)
+        sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
+        join-path                (get joins join-or-id-column [])
+        id-column                (if is-join? (second join-path) join-or-id-column)
+        is-to-one?               (to-one? join-path)
+        query-joins              (keep #(when (map? %) %) query)
+        rows                     (jdbc/query db [sql])
+        get-root-set             (fn [join]
+                                   (let [join-key      (ffirst join)
+                                         join-sequence (get joins join-key [])
+                                         root-set-prop (first join-sequence)]
+                                     (if root-set-prop
+                                       (reduce (fn [s row] (conj s (get row root-set-prop))) #{} rows)
+                                       #{})))
+        join-results             (reduce
+                                   (fn [acc query-join]
+                                     (let [results         (run-query* db schema (join-key query-join) (join-query query-join) (get-root-set query-join))
+                                           join-sequence   (get joins (join-key query-join))
+                                           fkid-col        (second join-sequence)
+                                           ; TODO: to-one
+                                           grouped-results (group-by fkid-col results)]
+                                       (assoc acc (join-key query-join) grouped-results)))
+                                   {}
+                                   query-joins)
+        join-row-to-join-results (fn [row]
+                                   (reduce
+                                     (fn [r [jk grouped-results]]
+                                       (let [row-id      (get r id-column)
+                                             join-result (get grouped-results row-id)]
+                                         (if (and join-result (seq join-result))
+                                           (assoc r jk join-result)
+                                           r)))
+                                     row join-results))
+        final-results            (map join-row-to-join-results rows)]
+    (if is-to-one?
+      (first final-results)
+      (vec final-results))))
+
 (defn run-query
   "Run a graph query against an SQL database.
 
@@ -458,14 +499,16 @@
   - IF the join-or-id-column is a to-one join: returns a map
   - Otherwise returns a vector of maps, one entry for each ID in root-id-set
   "
-  [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
-  (assert (s/valid? ::schema schema) "schema is valid")
-  (let [is-join?   (contains? joins join-or-id-column)
-        sql        (query-for schema)
-        join-path  (get joins join-or-id-column [])
-        id-column  (if is-join? (second join-path) join-or-id-column)
-        is-to-one? (to-one? join-path)
-        ]
-
-    ))
+  [db {:keys [::joins ::graph->sql] :as schema} join-or-id-column query root-id-set]
+  (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
+        sql->graph    (set/map-invert graph->sql)
+        graph-results (clojure.walk/postwalk (fn [ele]
+                                               (cond
+                                                 (and (keyword? ele) (= "id" (name ele))) :db/id
+                                                 (keyword? ele) (get sql->graph ele ele)
+                                                 :else ele)) sql-results)
+        nquery        [{:tmp query}]
+        ndb           {:tmp graph-results}]
+    ; Leverage db->tree to filter out the cruft we've added to accomplish the joins
+    (:tmp (om/db->tree nquery ndb {}))))
 

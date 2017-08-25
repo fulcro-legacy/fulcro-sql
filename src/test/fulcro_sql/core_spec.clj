@@ -13,15 +13,18 @@
 (def test-database {:hikaricp-config "test.properties"
                     :migrations      ["classpath:migrations/test"]})
 
-(def test-schema {::core/graph->sql {:person/name    :member/name
-                                  :person/account :member/account_id}
-                  ::core/joins   {:account/members  (core/to-many [:account/id :member/account_id])
-                                  :member/account   (core/to-one [:member/account_id :account/id])
-                                  :account/invoices (core/to-many [:account/id :invoice/account_id])
-                                  :invoice/account  (core/to-one [:invoice/account_id :account/id])
-                                  :invoice/items    (core/to-many [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id])
-                                  :item/invoices    (core/to-many [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id])}
-                  ::core/pks     {}})
+(def test-schema {::core/graph->sql {:person/name                  :member/name
+                                     :person/account               :member/account_id
+                                     :settings/auto-open?          :settings/auto_open
+                                     :settings/keyboard-shortcuts? :settings/keyboard_shortcuts}
+                  ::core/joins      {:account/members  (core/to-many [:account/id :member/account_id])
+                                     :account/settings (core/to-one [:account/settings_id :settings/id])
+                                     :member/account   (core/to-one [:member/account_id :account/id])
+                                     :account/invoices (core/to-many [:account/id :invoice/account_id])
+                                     :invoice/account  (core/to-one [:invoice/account_id :account/id])
+                                     :invoice/items    (core/to-many [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id])
+                                     :item/invoices    (core/to-many [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id])}
+                  ::core/pks        {}})
 
 (specification "Database Component" :integration
   (behavior "Can create a functional database pool from HikariCP properties and Flyway migrations."
@@ -60,11 +63,11 @@
         (:last_edited_by real-joe) => sam))))
 
 (specification "Table Detection: `table-for`"
-  (let [schema {::core/pks     {}
-                ::core/joins   {}
+  (let [schema {::core/pks        {}
+                ::core/joins      {}
                 ::core/graph->sql {:thing/name    :sql_table/name
-                                :boo/blah      :sql_table/prop
-                                :the-thing/boo :the-table/bah}}]
+                                   :boo/blah      :sql_table/prop
+                                   :the-thing/boo :the-table/bah}}]
     (assertions
       ":id and :db/id are ignored"
       (core/table-for schema [:account/name :db/id :id]) => :account
@@ -89,16 +92,16 @@
 
 (def sample-schema
   {::core/graph->sql {:thing/name    :sql_table/name
-                   :boo/blah      :sql_table/prop
-                   :the-thing/boo :the-table/bah}
+                      :boo/blah      :sql_table/prop
+                      :the-thing/boo :the-table/bah}
    ; FROM AN SQL PERSPECTIVE...Not Om
-   ::core/pks     {:account :id :member :id :invoice :id :item :id}
-   ::core/joins   {
-                   :account/address [:account/address_id :address/id]
-                   :account/members [:account/id :member/account_id]
-                   :member/account  [:member/account_id :account/id]
-                   :invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
-                   :item/invoice    [:item/id :invoice_items/item_id :invoice_items/line_item_id :invoice/line_item_id]}})
+   ::core/pks        {:account :id :member :id :invoice :id :item :id}
+   ::core/joins      {
+                      :account/address [:account/address_id :address/id]
+                      :account/members [:account/id :member/account_id]
+                      :member/account  [:member/account_id :account/id]
+                      :invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
+                      :item/invoice    [:item/id :invoice_items/item_id :invoice_items/line_item_id :invoice/line_item_id]}})
 
 (specification "columns-for"
   (assertions
@@ -136,16 +139,16 @@
     (core/sqlprop-for-join test-schema :member {:member/account [:db/id :account/name]}) => :member/account_id
     (core/sqlprop-for-join test-schema :invoice {:invoice/account [:db/id :account/name]}) => :invoice/account_id))
 
-(specification "Single-level query-for query generation"
+(specification "Single-level query-for query generation" :focused
   (assertions
-    "Generates a base non-recursive SQL query"
+    "Generates a base non-recursive SQL query that includes necessary join resolution columns"
     (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
-    (core/query-for test-schema :account/members [:db/id :member/name] (sorted-set 1 5)) => "SELECT member.id AS \"member/id\",member.name AS \"member/name\" FROM member WHERE member.account_id IN (1,5)"
-    "Derives table name if none is supplied when possible"
+    (core/query-for test-schema :account/members [:db/id :member/name] (sorted-set 1 5)) => "SELECT member.account_id AS \"member/account_id\",member.id AS \"member/id\",member.name AS \"member/name\" FROM member WHERE member.account_id IN (1,5)"
+    (core/query-for test-schema :account/settings [:db/id :settings/auto-open?] (sorted-set 3)) => "SELECT settings.auto_open AS \"settings/auto_open\",settings.id AS \"settings/id\" FROM settings WHERE settings.id IN (3)"
+    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.bah AS \"boo/bah\",boo.id AS \"boo/id\",boo.name AS \"boo/name\" FROM boo WHERE boo.id IN (3)"
+    "Derives correct SQL table name if possible"
     (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
     (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")
-    "Properly generates a comma-separated list of selectors"
-    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.bah AS \"boo/bah\",boo.id AS \"boo/id\",boo.name AS \"boo/name\" FROM boo WHERE boo.id IN (3)"
     ))
 
 (specification "target-table-for-join"
@@ -171,14 +174,14 @@
       => "SELECT invoice_items.invoice_id AS \"invoice_items/invoice_id\",item.id AS \"item/id\",item.amount AS \"item/amount\" FROM invoice_items INNER JOIN item ON invoice_items.item_id = item.id WHERE invoice_items.invoice_id IN (3,5)"))
 
 #_(def test-schema {::core/graph->sql {:person/name    :member/name
-                                    :person/account :member/account_id}
-                    ::core/joins   {:account/members  [:account/id :member/account_id]
-                                    :member/account   [:member/account_id :account/id]
-                                    :account/invoices [:account/id :invoice/account_id]
-                                    :invoice/account  [:invoice/account_id :account/id]
-                                    :invoice/items    [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
-                                    :item/invoice     [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id]}
-                    ::core/pks     {}})
+                                       :person/account :member/account_id}
+                    ::core/joins      {:account/members  [:account/id :member/account_id]
+                                       :member/account   [:member/account_id :account/id]
+                                       :account/invoices [:account/id :invoice/account_id]
+                                       :invoice/account  [:invoice/account_id :account/id]
+                                       :invoice/items    [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
+                                       :item/invoice     [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id]}
+                    ::core/pks        {}})
 (def pretend-results
   {:account       [{:account/id :id/joe :account/name "Joe"}]
    :invoice       [{:invoice/id :id/invoice-1 :invoice/account_id :id/joe :invoice/invoice_date (tm/date-time 2017 03 04)}
@@ -199,7 +202,13 @@
 ; step 2a: group results by (second join-sequence) (the foreign table's root set id column)
 ; step 2b: for each row from (1), join the correct group from (2a) to join prop of (2)
 
-(def test-rows [(core/seed-row :account {:id :id/joe :name "Joe"})
+(def test-rows [
+                (core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
+                (core/seed-row :account {:id :id/joe :name "Joe" :settings_id :id/joe-settings})
+                (core/seed-row :account {:id :id/mary :name "Mary"})
+                (core/seed-row :member {:id :id/sam :name "Sam" :account_id :id/joe})
+                (core/seed-row :member {:id :id/sally :name "Sally" :account_id :id/joe})
+                (core/seed-row :member {:id :id/judy :name "Judy" :account_id :id/mary})
                 (core/seed-row :invoice {:id :id/invoice-1 :account_id :id/joe :invoice_date (tm/date-time 2017 03 04)})
                 (core/seed-row :invoice {:id :id/invoice-2 :account_id :id/joe :invoice_date (tm/date-time 2016 01 02)})
                 (core/seed-row :item {:id :id/gadget :name "gadget"})
@@ -212,18 +221,28 @@
 
 (specification "Integration Tests for Graph Queries" :integration :focused
   (with-database [db test-database]
-    (let [{:keys [id/joe id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner]} (core/seed! db test-schema test-rows)
-          query           [:db/id :account/name {:account/invoices [:db/id
-                                                                    ;{:invoice/invoice_items [:invoice_items/quantity]}
-                                                                    {:invoice/items [:db/id :item/name]}]}]
-          expected-result {:account/id       joe
-                           :account/name     "Joe"
-                           :account/invoices [{:invoice/id invoice-1 :invoice/items [{:item/id gadget :item/name "gadget"}]}
-                                              {:invoice/id invoice-2 :invoice/items [{:item/id widget :item/name "widget"}
-                                                                                     {:item/id spanner :item/name "spanner"}
-                                                                                     {:item/id gadget :item/name "gadget"}]}]}
-          root-set        #{joe}
-          source-table    :account]
-      #_(assertions
-          (core/run-query db test-schema :to-one :account #{joe} query) => expected-result))))
+    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db test-schema test-rows)
+          query             [:db/id :account/name {:account/invoices [:db/id
+                                                                      ;{:invoice/invoice_items [:invoice_items/quantity]}
+                                                                      {:invoice/items [:db/id :item/name]}]}]
+          expected-result   {:account/id       joe
+                             :account/name     "Joe"
+                             :account/invoices [{:invoice/id invoice-1 :invoice/items [{:item/id gadget :item/name "gadget"}]}
+                                                {:invoice/id invoice-2 :invoice/items [{:item/id widget :item/name "widget"}
+                                                                                       {:item/id spanner :item/name "spanner"}
+                                                                                       {:item/id gadget :item/name "gadget"}]}]}
+          query-2           [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
+          expected-result-2 [{:db/id           mary
+                              :account/members [{:db/id judy :person/name "Judy"}]}
+                             {:db/id            joe
+                              :account/members  [{:db/id sam :person/name "Sam"}
+                                                 {:db/id sally :person/name "Sally"}]
+                              :account/settings {:db/id joe-settings :settings/auto-open? true}}]
+          root-set          #{joe}
+          source-table      :account]
+      (assertions
+        ;(core/run-query db test-schema :account/id query #{joe}) => [expected-result]
+        (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        ))
+    ))
 

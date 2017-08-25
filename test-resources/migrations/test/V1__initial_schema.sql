@@ -1,7 +1,14 @@
+CREATE TABLE settings (
+  id                 SERIAL PRIMARY KEY,
+  auto_open          BOOLEAN NOT NULL DEFAULT FALSE,
+  keyboard_shortcuts BOOLEAN NOT NULL DEFAULT TRUE
+);
+
 CREATE TABLE account (
   id             SERIAL PRIMARY KEY,
   name           TEXT,
   last_edited_by INTEGER,
+  settings_id    INTEGER REFERENCES settings (id),
   created_on     TIMESTAMP NOT NULL DEFAULT now()
 );
 
