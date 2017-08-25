@@ -228,6 +228,13 @@
   [table id value]
   (with-meta value {:update id :table table}))
 
+(defn join-key
+  "Returns the key in a join. E.g. for {:k [...]} it returns :k"
+  [join] (ffirst join))
+(defn join-query
+  "Returns the subquery of a join. E.g. for {:k [:data]} it returns [:data]."
+  [join] (-> join first second))
+
 (defn pk-column
   "Returns the SQL column for a given table's primary key"
   [schema table]
@@ -315,8 +322,8 @@
   (str (namespace prop) "." (name prop)))
 
 (defn sqlprop-for-join
-  "Returns the sqlprop column needed from `table` if the given join requires it in order to complete the given `join`."
-  [{:keys [::joins] :as schema} table join]
+  "Returns the sqlprop column needed from the source table."
+  [{:keys [::joins] :as schema} join]
   (let [jk               (omprop->sqlprop schema (ffirst join))
         join-description (get joins jk)]
     (first join-description)))
@@ -335,7 +342,7 @@
    (let [table                (table-for schema graph-query)
          join-cols-to-include (->> graph-query
                                 (filter map?)
-                                (keep (partial sqlprop-for-join schema table)))
+                                (keep (partial sqlprop-for-join schema)))
          sql-join-column      (second (get joins graph-join-prop))
          columns              (apply sorted-set (concat (columns-for schema graph-query) join-cols-to-include))
          columns              (if sql-join-column (conj columns sql-join-column) columns)
@@ -403,12 +410,29 @@
 (defn to-one?
   "Is the give join to-one? Returns true iff the join is marked to-one."
   [join]
-  (some-> join meta :to-one))
+  (= :to-one (some-> join meta :arity)))
 
 (defn to-many?
   "Is the given join to-many? Returns true if the join is marked to many, or if the join is unmarked (e.g. default)"
   [join]
-  (or (some-> join meta :to-many) (not (to-one? join))))
+  (or (= :to-many (some-> join meta :arity)) (not (to-one? join))))
+
+(defn reverse?
+  "Opposite of forward?"
+  [{:keys [::joins] :as schema} graph-key-or-join]
+  (let [graph-join-prop (if (map? graph-key-or-join) (join-key graph-key-or-join)
+                                                     graph-key-or-join)
+        join-sequence   (get joins graph-join-prop)
+        source-table    (keyword (namespace graph-join-prop))
+        source-pk-col   (pk-column schema source-table)
+        source-pk       (keyword (name source-table) (name source-pk-col))
+        join-start      (first join-sequence)]
+    (= join-start source-pk)))
+
+(defn forward?
+  "Returns true if the join key is on the source table (as opposed to the target table)"
+  [schema graph-join]
+  (not (reverse? schema graph-join)))
 
 #_(defn run-query
     "Run an om query against the given database.
@@ -441,9 +465,6 @@
         (first result-rows)
         (vec result-rows))))
 
-(defn join-key [join] (ffirst join))
-(defn join-query [join] (-> join first second))
-
 (defn- run-query*
   [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
   (assert (s/valid? ::schema schema) "schema is valid")
@@ -465,17 +486,26 @@
                                    (fn [acc query-join]
                                      (let [results         (run-query* db schema (join-key query-join) (join-query query-join) (get-root-set query-join))
                                            join-sequence   (get joins (join-key query-join))
+                                           is-to-one?      (to-one? join-sequence)
                                            fkid-col        (second join-sequence)
-                                           ; TODO: to-one
-                                           grouped-results (group-by fkid-col results)]
+                                           grouped-results (group-by fkid-col results)
+                                           grouped-results (if is-to-one?
+                                                             {(get results fkid-col) results}
+                                                             grouped-results)]
                                        (assoc acc (join-key query-join) grouped-results)))
                                    {}
                                    query-joins)
         join-row-to-join-results (fn [row]
                                    (reduce
                                      (fn [r [jk grouped-results]]
-                                       (let [row-id      (get r id-column)
+                                       ; FIXME: id-column is right for reverse FK, but not for forward FK or many-to-many
+                                       (let [forward-key      (first (get joins jk))
+                                             row-id      (if (forward? schema jk)
+                                                           (get r forward-key)
+                                                           (get r id-column))
                                              join-result (get grouped-results row-id)]
+                                         (println :r r :row-id row-id :jk jk :gr grouped-results :jr join-result)
+
                                          (if (and join-result (seq join-result))
                                            (assoc r jk join-result)
                                            r)))

@@ -133,11 +133,25 @@
 (specification "sqlprop-for-join"
   (assertions
     "pulls the ID column if it is a FK back-reference join"
-    (core/sqlprop-for-join test-schema :account {:account/members [:db/id :member/name]}) => :account/id
-    (core/sqlprop-for-join test-schema :account {:account/invoices [:db/id :invoice/created_on]}) => :account/id
+    (core/sqlprop-for-join test-schema {:account/members [:db/id :member/name]}) => :account/id
+    (core/sqlprop-for-join test-schema {:account/invoices [:db/id :invoice/created_on]}) => :account/id
     "Pulls the correct FK column when edge goes from the given table"
-    (core/sqlprop-for-join test-schema :member {:member/account [:db/id :account/name]}) => :member/account_id
-    (core/sqlprop-for-join test-schema :invoice {:invoice/account [:db/id :account/name]}) => :invoice/account_id))
+    (core/sqlprop-for-join test-schema {:member/account [:db/id :account/name]}) => :member/account_id
+    (core/sqlprop-for-join test-schema {:invoice/account [:db/id :account/name]}) => :invoice/account_id))
+
+(specification "forward? and reverse?"
+  (assertions
+    "forward? is true when the join FK points from the source table to the PK of the target table"
+    (core/forward? test-schema {:account/members [:db/id]}) => false
+    (core/forward? test-schema {:account/settings [:db/id]}) => true
+    (core/forward? test-schema {:invoice/items [:db/id]}) => false
+    (core/forward? test-schema :account/members) => false
+    (core/forward? test-schema :account/settings) => true
+    (core/forward? test-schema :invoice/items) => false
+    "reverse? is true when the join FK points from the source table to the PK of the target table"
+    (core/reverse? test-schema {:account/members [:db/id]}) => true
+    (core/reverse? test-schema {:account/settings [:db/id]}) => false
+    (core/reverse? test-schema {:invoice/items [:db/id]}) => true))
 
 (specification "Single-level query-for query generation" :focused
   (assertions
@@ -148,8 +162,7 @@
     (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.bah AS \"boo/bah\",boo.id AS \"boo/id\",boo.name AS \"boo/name\" FROM boo WHERE boo.id IN (3)"
     "Derives correct SQL table name if possible"
     (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
-    (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")
-    ))
+    (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")))
 
 (specification "target-table-for-join"
   (assertions
@@ -232,17 +245,17 @@
                                                                                        {:item/id spanner :item/name "spanner"}
                                                                                        {:item/id gadget :item/name "gadget"}]}]}
           query-2           [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
-          expected-result-2 [{:db/id           mary
-                              :account/members [{:db/id judy :person/name "Judy"}]}
-                             {:db/id            joe
+          expected-result-2 [{:db/id            joe
+                              :account/name     "Joe"
                               :account/members  [{:db/id sam :person/name "Sam"}
                                                  {:db/id sally :person/name "Sally"}]
-                              :account/settings {:db/id joe-settings :settings/auto-open? true}}]
+                              :account/settings {:db/id joe-settings :settings/auto-open? true}}
+                             {:db/id            mary
+                              :account/name     "Mary"
+                              :account/settings {}
+                              :account/members  [{:db/id judy :person/name "Judy"}]}]
           root-set          #{joe}
           source-table      :account]
       (assertions
         ;(core/run-query db test-schema :account/id query #{joe}) => [expected-result]
-        (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
-        ))
-    ))
-
+        (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2))))
