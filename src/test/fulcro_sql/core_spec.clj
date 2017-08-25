@@ -4,8 +4,10 @@
     [fulcro-sql.core :as core]
     [fulcro-sql.test-helpers :refer [with-database]]
     [clojure.spec.alpha :as s]
+    [clj-time.core :as tm]
     [com.stuartsierra.component :as component]
     [clojure.java.jdbc :as jdbc]
+    [clj-time.jdbc]
     [taoensso.timbre :as timbre]))
 
 (def test-database {:hikaricp-config "test.properties"
@@ -13,10 +15,13 @@
 
 (def test-schema {::core/om->sql {:person/name    :member/name
                                   :person/account :member/account_id}
-                  ::core/joins   {:account/members [:account/id :member/account_id]
-                                  :member/account  [:member/account_id :account/id]}
-                  ::core/pks     {:account :id
-                                  :member  :id}})
+                  ::core/joins   {:account/members  (core/to-many [:account/id :member/account_id])
+                                  :member/account   (core/to-one [:member/account_id :account/id])
+                                  :account/invoices (core/to-many [:account/id :invoice/account_id])
+                                  :invoice/account  (core/to-one [:invoice/account_id :account/id])
+                                  :invoice/items    (core/to-many [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id])
+                                  :item/invoices    (core/to-many [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id])}
+                  ::core/pks     {}})
 
 (specification "Database Component" :integration
   (behavior "Can create a functional database pool from HikariCP properties and Flyway migrations."
@@ -53,9 +58,6 @@
         "The data is inserted into the database"
         (:name real-joe) => "Joe"
         (:last_edited_by real-joe) => sam))))
-
-
-
 
 (specification "Table Detection: `table-for`"
   (let [schema {::core/pks     {}
@@ -145,18 +147,56 @@
     "Returns nil when the columns is not a registered join"
     (core/target-table-for-join sample-schema :account/id) => nil))
 
-(specification "query-for-join" :focused
+(specification "query-for-join"
   (assertions
     "Can follow a standard one-to-many where the FK is on the target table."
-    (core/query-for-join test-schema {:account/members [:db/id :member/name]} [{:account/id 1} {:account/id 2}])
-    => "SELECT member.name AS \"member/name\",member.id AS \"member/id\" FROM member WHERE member.account_id IN (1,2)"
+    (first (core/query-for-join test-schema {:account/members [:db/id :member/name]} [{:account/id 1} {:account/id 2}]))
+    => "SELECT member.account_id AS \"member/account_id\",member.name AS \"member/name\",member.id AS \"member/id\" FROM member WHERE member.account_id IN (1,2)"
     "Can follow a standard one-to-one where the FK is on the source table to the target ID."
-    (core/query-for-join sample-schema {:account/address [:db/id :address/street]} [{:account/address_id 8} {:account/address_id 11}])
+    (first (core/query-for-join sample-schema {:account/address [:db/id :address/street]} [{:account/address_id 8} {:account/address_id 11}]))
     => "SELECT address.id AS \"address/id\",address.street AS \"address/street\" FROM address WHERE address.id IN (11,8)"
 
     ;:invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
     "Can follow a standard many-to-many which will include the source table ID for join-resolution"
-    (core/query-for-join sample-schema {:invoice/items [:db/id :item/amount]} [{:invoice/id 3} {:invoice/id 5}])
-    => "SELECT invoice_items.invoice_id AS \"invoice_items/invoice_id\",item.id AS \"item/id\",item.amount AS \"item/amount\" FROM invoice_items INNER JOIN item ON invoice_items.item_id = item.id WHERE invoice_items.invoice_id IN (3,5)"
-    ))
+    (first (core/query-for-join sample-schema {:invoice/items [:db/id :item/amount]} [{:invoice/id 3} {:invoice/id 5}]))
+    => "SELECT invoice_items.invoice_id AS \"invoice_items/invoice_id\",item.id AS \"item/id\",item.amount AS \"item/amount\" FROM invoice_items INNER JOIN item ON invoice_items.item_id = item.id WHERE invoice_items.invoice_id IN (3,5)"))
+
+#_(def test-schema {::core/om->sql {:person/name    :member/name
+                                    :person/account :member/account_id}
+                    ::core/joins   {:account/members  [:account/id :member/account_id]
+                                    :member/account   [:member/account_id :account/id]
+                                    :account/invoices [:account/id :invoice/account_id]
+                                    :invoice/account  [:invoice/account_id :account/id]
+                                    :invoice/items    [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
+                                    :item/invoice     [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id]}
+                    ::core/pks     {}})
+
+(def test-rows [(core/seed-row :account {:id :id/joe :name "Joe"})
+                (core/seed-row :member {:id :id/sam :name "Sam" :account_id :id/joe})
+                (core/seed-row :invoice {:id :id/invoice-1 :account_id :id/joe :invoice_date (tm/date-time 2017 03 04)})
+                (core/seed-row :invoice {:id :id/invoice-2 :account_id :id/joe :invoice_date (tm/date-time 2016 01 02)})
+                (core/seed-row :item {:id :id/gadget :name "gadget"})
+                (core/seed-row :item {:id :id/widget :name "widget"})
+                (core/seed-row :item {:id :id/spanner :name "spanner"})
+                (core/seed-row :invoice_items {:id :join-row-1 :invoice_id :id/invoice-1 :item_id :id/gadget :invoice_items/quantity 2})
+                (core/seed-row :invoice_items {:id :join-row-2 :invoice_id :id/invoice-2 :item_id :id/widget :invoice_items/quantity 8})
+                (core/seed-row :invoice_items {:id :join-row-3 :invoice_id :id/invoice-2 :item_id :id/spanner :invoice_items/quantity 1})
+                (core/seed-row :invoice_items {:id :join-row-4 :invoice_id :id/invoice-2 :item_id :id/gadget :invoice_items/quantity 5})])
+
+(specification "Integration Tests for Graph Queries" :integration :focused
+  (with-database [db test-database]
+    (let [{:keys [id/joe id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner]} (core/seed! db test-schema test-rows)
+          query           [:db/id :account/name {:account/invoices [:db/id
+                                                                    ;{:invoice/invoice_items [:invoice_items/quantity]}
+                                                                    {:invoice/items [:db/id :item/name]}]}]
+          expected-result {:account/id       joe
+                           :account/name     "Joe"
+                           :account/invoices [{:invoice/id invoice-1 :invoice/items [{:item/id gadget :item/name "gadget"}]}
+                                              {:invoice/id invoice-2 :invoice/items [{:item/id widget :item/name "widget"}
+                                                                                     {:item/id spanner :item/name "spanner"}
+                                                                                     {:item/id gadget :item/name "gadget"}]}]}
+          root-set        #{joe}
+          source-table    :account]
+      (assertions
+        (core/run-query db test-schema :to-one :account #{joe} query) => expected-result))))
 
