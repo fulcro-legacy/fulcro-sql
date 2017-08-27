@@ -1,7 +1,8 @@
 = Fulcro SQL
 
-WARNING: This library is under development. The API can change, especially around the graph traversal code. The
-general PostgreSQL database component is fairly solid as are the seeding and test utilities.
+WARNING: This library is under development. The API can change. The
+general database manager component is fairly solid as are the seeding and test utilities. The
+configuration is also a bit less than optimal, and will ideally be optimized.
 
 A utility library for working with SQL databases. It includes the following:
 
@@ -18,6 +19,15 @@ is particularly well-suited when you need to use SQL databases from Fulcro or Om
 
 Connection pooling is provided by http://brettwooldridge.github.io/HikariCP/[HikariCP].
 Migrations are provided by http://flywaydb.org/[Flyway].
+
+== Supported Databases
+
+At present there are tests and drivers for:
+
+- PostgreSQL
+- MySQL
+
+Adding additional support is pretty trivial. See <<adding-driver>>.
 
 == Usage
 
@@ -43,9 +53,11 @@ the following shape (as a component):
 {:value
   { :sqldbm
     { :database-name {:hikaricp-config "test.properties"
+                      :driver        :default ; optional, defaults to postgresql
+                      :database-name "dbname" ; needed only for mysql
                       :auto-migrate? true
-                      :create-drop? true
-                      :migrations      ["classpath:migrations/test"]}}}}
+                      :create-drop?  true
+                      :migrations    ["classpath:migrations/test"]}}}}
 ```
 
 The top two keys (`:value` and `:sqldbm`) are in the path for the map because the assumption is
@@ -72,6 +84,8 @@ documentation for the naming conventions of these files.
 - `auto-migrate?` : When true, will have flyway attempt to bring migrations up-to-date.
 - `create-drop?` : When true, will drop the complete schema from the database (and all associated data) and
 recreate that schema from scratch.
+- `database-name` : The string name of the database. Needed if using mysql.
+- `driver` : The keyword indicating the kind of database in use (:default, :postgresql, :mysql)
 
 Example files:
 
@@ -357,7 +371,7 @@ then you can do things like:
 
 and see messages from the underlying connection pool and migration libraries.
 
-== Adding a New Driver
+== Adding a New Driver [[adding-driver,Adding a Driver]]
 
 Fulcro-SQL is built to be customizable. Each of the core processes is defined by a multimethod that
 dispatches on the `:driver` key of the database's config (if provided).
