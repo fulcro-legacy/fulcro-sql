@@ -153,7 +153,7 @@
     (core/reverse? test-schema {:account/settings [:db/id]}) => false
     (core/reverse? test-schema {:invoice/items [:db/id]}) => true))
 
-(specification "Single-level query-for query generation" :focused
+(specification "Single-level query-for query generation"
   (assertions
     "Generates a base non-recursive SQL query that includes necessary join resolution columns"
     (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
@@ -163,40 +163,6 @@
     "Derives correct SQL table name if possible"
     (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
     (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")))
-
-(specification "target-table-for-join"
-  (assertions
-    "finds the table name where data will come from for a join"
-    (core/target-table-for-join sample-schema :invoice/items) => :item
-    (core/target-table-for-join sample-schema :account/members) => :member
-    "Returns nil when the columns is not a registered join"
-    (core/target-table-for-join sample-schema :account/id) => nil))
-
-#_(specification "query-for-join"
-    (assertions
-      "Can follow a standard one-to-many where the FK is on the target table."
-      (first (core/query-for-join test-schema {:account/members [:db/id :member/name]} [{:account/id 1} {:account/id 2}]))
-      => "SELECT member.account_id AS \"member/account_id\",member.name AS \"member/name\",member.id AS \"member/id\" FROM member WHERE member.account_id IN (1,2)"
-      "Can follow a standard one-to-one where the FK is on the source table to the target ID."
-      (first (core/query-for-join sample-schema {:account/address [:db/id :address/street]} [{:account/address_id 8} {:account/address_id 11}]))
-      => "SELECT address.id AS \"address/id\",address.street AS \"address/street\" FROM address WHERE address.id IN (11,8)"
-
-      ;:invoice/items   [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
-      "Can follow a standard many-to-many which will include the source table ID for join-resolution"
-      (first (core/query-for-join sample-schema {:invoice/items [:db/id :item/amount]} [{:invoice/id 3} {:invoice/id 5}]))
-      => "SELECT invoice_items.invoice_id AS \"invoice_items/invoice_id\",item.id AS \"item/id\",item.amount AS \"item/amount\" FROM invoice_items INNER JOIN item ON invoice_items.item_id = item.id WHERE invoice_items.invoice_id IN (3,5)"))
-
-(def pretend-results
-  {:account       [{:account/id :id/joe :account/name "Joe"}]
-   :invoice       [{:invoice/id :id/invoice-1 :invoice/account_id :id/joe :invoice/invoice_date (tm/date-time 2017 03 04)}
-                   {:invoice/id :id/invoice-2 :invoice/account_id :id/joe :invoice/invoice_date (tm/date-time 2016 01 02)}]
-   :item          [{:item/id :id/gadget :item/name "gadget"}
-                   {:item/id :id/widget :item/name "widget"}
-                   {:item/id :id/spanner :item/name "spanner"}]
-   :invoice_items [{:invoice_items/id :join-row-1 :invoice_items/invoice_id :id/invoice-1 :invoice_items/item_id :id/gadget :invoice_items/quantity 2}
-                   {:invoice_items/id :join-row-2 :invoice_items/invoice_id :id/invoice-2 :invoice_items/item_id :id/widget :invoice_items/quantity 8}
-                   {:invoice_items/id :join-row-3 :invoice_items/invoice_id :id/invoice-2 :invoice_items/item_id :id/spanner :invoice_items/quantity 1}
-                   {:invoice_items/id :join-row-4 :invoice_items/invoice_id :id/invoice-2 :invoice_items/item_id :id/gadget :invoice_items/quantity 5}]})
 
 (def test-rows [(core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
                 (core/seed-row :account {:id :id/joe :name "Joe" :settings_id :id/joe-settings})
@@ -220,12 +186,12 @@
           query             [:db/id :account/name {:account/invoices [:db/id
                                                                       ;{:invoice/invoice_items [:invoice_items/quantity]}
                                                                       {:invoice/items [:db/id :item/name]}]}]
-          expected-result   {:account/id       joe
+          expected-result   {:db/id            joe
                              :account/name     "Joe"
-                             :account/invoices [{:invoice/id invoice-1 :invoice/items [{:item/id gadget :item/name "gadget"}]}
-                                                {:invoice/id invoice-2 :invoice/items [{:item/id widget :item/name "widget"}
-                                                                                       {:item/id spanner :item/name "spanner"}
-                                                                                       {:item/id gadget :item/name "gadget"}]}]}
+                             :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                {:db/id invoice-2 :invoice/items [{:db/id gadget :item/name "gadget"}
+                                                                                  {:db/id widget :item/name "widget"}
+                                                                                  {:db/id spanner :item/name "spanner"}]}]}
           query-2           [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
           expected-result-2 [{:db/id            joe
                               :account/name     "Joe"
@@ -240,9 +206,11 @@
           source-table      :account]
       (assertions
         (core/run-query db test-schema :account/id query #{joe}) => [expected-result]
-        (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2))))
+        ;(core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        ))))
 
 (comment
   (do
     (require 'taoensso.timbre)
     (taoensso.timbre/set-level! :error)))
+

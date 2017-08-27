@@ -356,61 +356,29 @@
          join-cols-to-include (->> graph-query
                                 (filter map?)
                                 (keep (partial sqlprop-for-join schema)))
-         sql-join-column      (second (get joins graph-join-prop))
+         join-path            (get joins graph-join-prop)
+         sql-join-column      (second join-path)
          columns              (apply sorted-set (concat (columns-for schema graph-query) join-cols-to-include))
          columns              (if sql-join-column (conj columns sql-join-column) columns)
          column-selectors     (map #(column-spec schema %) columns)
          selectors            (str/join "," column-selectors)
          table-name           (name table)
          ids                  (str/join "," (map str (keep identity id-set)))
+         has-join-table?      (> (count join-path) 2)
          id-col               (if sql-join-column
                                 (str-col sql-join-column)
                                 (str-idcol schema table))
-         sql                  (str "SELECT " selectors " FROM " table-name " WHERE " id-col " IN (" ids ")")]
+         sql                  (if has-join-table?
+                                (let [left-table  (-> join-path second namespace)
+                                      right-table (-> join-path last namespace)
+                                      col-left    (-> join-path (nth 2) str-col)
+                                      col-right   (-> join-path (nth 3) str-col)
+                                      filter-col  (-> join-path second str-col)
+                                      from-clause (str "FROM " left-table " INNER JOIN " right-table " ON " col-left " = " col-right)
+                                      ids         (str/join "," id-set)]
+                                  (str "SELECT " selectors " " from-clause " WHERE " filter-col " IN (" ids ")"))
+                                (str "SELECT " selectors " FROM " table-name " WHERE " id-col " IN (" ids ")"))]
      sql)))
-
-(defn target-table-for-join
-  "Given an SQL prop that is being used in a join, returns the target table for that join that contains the desired data"
-  [{:keys [::joins] :as schema} sqlprop]
-  (some-> sqlprop joins last namespace keyword))
-
-#_(defn query-for-join
-    "Given an om join and the rows retrieved for the level at the join, return a query that can obtain
-    the rows for the specified join."
-    [{:keys [::pks ::joins] :as schema} omjoin rows]
-    (let [sqlprop           (omprop->sqlprop schema (ffirst omjoin))
-          graph-query       (-> omjoin vals first)
-          source-table      (keyword (namespace sqlprop))
-          join-sequence     (get joins sqlprop)
-          source-pk         (keyword (name source-table) (name (get pks source-table :id)))
-          pk-set            (into #{} (map #(get % source-pk) rows))
-          join-start        (first join-sequence)
-          join-start-table  (keyword (namespace join-start))
-          join-target       (last join-sequence)
-          std-one-to-many?  (and (= 2 (count join-sequence)) (= join-start source-pk))
-          std-one-to-one?   (and (= 2 (count join-sequence))
-                              (not= join-start source-pk)
-                              (= join-start-table source-table))
-          std-many-to-many? (and (= 4 (count join-sequence)))]
-      (assert (contains? joins sqlprop) "Join is described")
-      (cond
-        std-one-to-many? [(query-for schema join-target graph-query pk-set) join-target]
-        std-one-to-one? (let [id-set (into #{} (map join-start rows))]
-                          [(query-for schema join-target graph-query id-set) join-target])
-        std-many-to-many? (let [left-table       (-> join-sequence second namespace)
-                                right-table      (-> join-sequence last namespace)
-                                col-left         (-> join-sequence (nth 2) str-col)
-                                col-right        (-> join-sequence (nth 3) str-col)
-                                filter-col       (-> join-sequence second str-col)
-                                columns          (columns-for schema graph-query)
-                                column-selectors (map #(column-spec schema %) columns)
-                                column-selectors (conj column-selectors (column-spec schema (second join-sequence)))
-                                selectors        (str/join "," column-selectors)
-                                from-clause      (str "FROM " left-table " INNER JOIN " right-table " ON "
-                                                   col-left " = " col-right)
-                                ids              (str/join "," pk-set)
-                                sql              (str "SELECT " selectors " " from-clause " WHERE " filter-col " IN (" ids ")")]
-                            [sql filter-col]))))
 
 (defn to-one [join-seq]
   (assert (and (vector? join-seq) (every? keyword? join-seq)) "join sequence is a vector of keywords")
@@ -447,16 +415,24 @@
   [schema graph-join]
   (not (reverse? schema graph-join)))
 
+(defn uses-join-table?
+  "Returns true if the join has a join table"
+  [{:keys [::joins] :as schema} graph-key-or-join]
+  (let [graph-join-prop (if (map? graph-key-or-join) (join-key graph-key-or-join)
+                                                     graph-key-or-join)
+        join-sequence   (get joins graph-join-prop)
+        ]
+    (= 4 (count join-sequence))))
+
 (defn- run-query*
   [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
   (assert (s/valid? ::schema schema) "schema is valid")
   (let [is-join?                 (contains? joins join-or-id-column)
-        sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
         join-path                (get joins join-or-id-column [])
         id-column                (if is-join? (second join-path) join-or-id-column)
         is-to-one?               (to-one? join-path)
-        has-join-table?          (> (count join-path) 2)
         query-joins              (keep #(when (map? %) %) query)
+        sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
         rows                     (jdbc/query db [sql])
         get-root-set             (fn [join]
                                    (let [join-key      (ffirst join)
@@ -482,10 +458,13 @@
                                    (reduce
                                      (fn [r [jk grouped-results]]
                                        ; FIXME: id-column is right for reverse FK, but not for forward FK or many-to-many
-                                       (let [forward-key (first (get joins jk))
-                                             row-id      (if (forward? schema jk)
-                                                           (get r forward-key)
-                                                           (get r id-column))
+                                       (let [join-path   (get joins jk)
+                                             forward-key (first join-path)
+                                             row-key     (cond
+                                                           (uses-join-table? schema jk) forward-key
+                                                           (forward? schema jk) forward-key
+                                                           :else id-column)
+                                             row-id      (get r row-key)
                                              join-result (get grouped-results row-id)]
                                          (if (and join-result (seq join-result))
                                            (assoc r jk join-result)
