@@ -179,7 +179,7 @@
 (defmulti next-id*
   (fn next-id-dispatch [db schema table] (get schema :driver :default)))
 
-(defmethod next-id* :default
+(defmethod next-id* :postgresql
   [db schema table]
   (assert (s/valid? ::schema schema) "Next-id requires a valid schema.")
   (let [pk      (get-in schema [::pks table] :id)
@@ -187,6 +187,10 @@
     (jdbc/query db [(str "SELECT nextval('" seqname "') AS \"id\"")]
       {:result-set-fn first
        :row-fn        :id})))
+
+(defmethod next-id* :default
+  [db schema table]
+  (next-id* db (assoc schema :driver :postgresql) table))
 
 (defn next-id
   "Get the next generated ID for the given table.
@@ -443,37 +447,6 @@
   [schema graph-join]
   (not (reverse? schema graph-join)))
 
-#_(defn run-query
-    "Run an om query against the given database.
-
-    db - The database
-    schema - The database schema
-    join-or-id-column - The column (which must be defined in schema) that represents the PK column of the table you are
-    querying, or the database join (edge) your following from the root set.
-    root-set - A set of IDs that identify the source rows for the query.
-    graph-query - The Om query to be run against the root-set (once per ID in root set)
-    "
-    [db {:keys [::joins] :as schema} join-id-or-column root-set graph-query]
-    (assert (s/valid? ::schema schema) "schema is valid")
-    (let [is-join?    (contains? joins join-id-or-column)
-          row-query   (if is-join?
-                        (query-for-join schema {join-id-or-column graph-query} root-set)
-                        (query-for schema table graph-query root-set))
-          prop-rows   (jdbc/query db [row-query])
-          joins       (filter map? graph-query)
-          is-one?     (and (= arity :to-one) (<= 1 (count prop-rows)))
-          result-rows (for [row prop-rows]
-                        (reduce
-                          (fn [r j]
-                            (let [[join-key join-query] j
-                                  row-id (get r (id-prop schema table))]
-                              (assoc r join-key (run-query db schema :to-many (table-for schema join-query) #{row-id} join-query)))
-                            ) row joins))
-          ]
-      (if is-one?
-        (first result-rows)
-        (vec result-rows))))
-
 (defn- run-query*
   [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
   (assert (s/valid? ::schema schema) "schema is valid")
@@ -482,6 +455,7 @@
         join-path                (get joins join-or-id-column [])
         id-column                (if is-join? (second join-path) join-or-id-column)
         is-to-one?               (to-one? join-path)
+        has-join-table?          (> (count join-path) 2)
         query-joins              (keep #(when (map? %) %) query)
         rows                     (jdbc/query db [sql])
         get-root-set             (fn [join]
@@ -513,8 +487,6 @@
                                                            (get r forward-key)
                                                            (get r id-column))
                                              join-result (get grouped-results row-id)]
-                                         (println :r r :row-id row-id :jk jk :gr grouped-results :jr join-result)
-
                                          (if (and join-result (seq join-result))
                                            (assoc r jk join-result)
                                            r)))

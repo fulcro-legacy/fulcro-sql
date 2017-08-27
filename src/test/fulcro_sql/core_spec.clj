@@ -186,15 +186,6 @@
       (first (core/query-for-join sample-schema {:invoice/items [:db/id :item/amount]} [{:invoice/id 3} {:invoice/id 5}]))
       => "SELECT invoice_items.invoice_id AS \"invoice_items/invoice_id\",item.id AS \"item/id\",item.amount AS \"item/amount\" FROM invoice_items INNER JOIN item ON invoice_items.item_id = item.id WHERE invoice_items.invoice_id IN (3,5)"))
 
-#_(def test-schema {::core/graph->sql {:person/name    :member/name
-                                       :person/account :member/account_id}
-                    ::core/joins      {:account/members  [:account/id :member/account_id]
-                                       :member/account   [:member/account_id :account/id]
-                                       :account/invoices [:account/id :invoice/account_id]
-                                       :invoice/account  [:invoice/account_id :account/id]
-                                       :invoice/items    [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id]
-                                       :item/invoice     [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id]}
-                    ::core/pks        {}})
 (def pretend-results
   {:account       [{:account/id :id/joe :account/name "Joe"}]
    :invoice       [{:invoice/id :id/invoice-1 :invoice/account_id :id/joe :invoice/invoice_date (tm/date-time 2017 03 04)}
@@ -207,16 +198,7 @@
                    {:invoice_items/id :join-row-3 :invoice_items/invoice_id :id/invoice-2 :invoice_items/item_id :id/spanner :invoice_items/quantity 1}
                    {:invoice_items/id :join-row-4 :invoice_items/invoice_id :id/invoice-2 :invoice_items/item_id :id/gadget :invoice_items/quantity 5}]})
 
-; step 1: query is [:db/id :account/name {:account/invoices [...]}]
-; step 1a: generate SQL with SQL props
-; step 1b: account rows come back
-; step 2: for each join
-;   results = recurse with join-prop from (2), subquery for (2), and root set from (1b). Determine root set by (first join-sequence)
-; step 2a: group results by (second join-sequence) (the foreign table's root set id column)
-; step 2b: for each row from (1), join the correct group from (2a) to join prop of (2)
-
-(def test-rows [
-                (core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
+(def test-rows [(core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
                 (core/seed-row :account {:id :id/joe :name "Joe" :settings_id :id/joe-settings})
                 (core/seed-row :account {:id :id/mary :name "Mary"})
                 (core/seed-row :member {:id :id/sam :name "Sam" :account_id :id/joe})
@@ -257,5 +239,10 @@
           root-set          #{joe}
           source-table      :account]
       (assertions
-        ;(core/run-query db test-schema :account/id query #{joe}) => [expected-result]
+        (core/run-query db test-schema :account/id query #{joe}) => [expected-result]
         (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2))))
+
+(comment
+  (do
+    (require 'taoensso.timbre)
+    (taoensso.timbre/set-level! :error)))

@@ -378,6 +378,10 @@ case you can dispatch to the alternate simply by passing an altered `:driver` in
   (next-id* db (assoc schema :driver :default) table))
 ```
 
+Note that all of the examples above are the `:default` behavior, so if your driver needs to only modify, say,
+the next ID behavior, then you can choose to leave the others as they are and only `defmethod` a dispatch
+for your override(s).
+
 == Contributing to Fulcro-SQL Development
 
 Please join the `#fulcro` Slack channel in http://clojurians.slack.com. Discuss how you'd like to help.
