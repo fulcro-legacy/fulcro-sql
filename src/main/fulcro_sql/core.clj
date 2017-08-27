@@ -82,16 +82,25 @@
             (conj cset (keyword (name table) (name pk))))
     #{} pks))
 
-(defmulti column-spec
+(defmulti column-spec*
   "Get the database-specific column query specification for a given SQL prop."
   (fn [schema sqlprop] (get schema ::driver :default)))
 
-(defmethod column-spec :default
+(defmethod column-spec* :default
   [schema sqlprop]
   (let [table   (namespace sqlprop)
         col     (name sqlprop)
         as-name (str (namespace sqlprop) "/" (name sqlprop))]
     (str table "." col " AS \"" as-name "\"")))
+
+(defn column-spec
+  "Returns a database-specific SQL property selection and AS clause for the given sql prop.
+
+  E.g.: (column-spec schema :account/name) => account.name AS \"account/name\"
+  "
+  [schema sqlprop]
+  (assert (s/valid? ::schema schema) "schema is valid")
+  (column-spec* schema sqlprop))
 
 (s/def ::migrations (s/and vector? #(every? string? %)))
 (s/def ::hikaricp-config string?)
@@ -499,7 +508,7 @@
                                    (reduce
                                      (fn [r [jk grouped-results]]
                                        ; FIXME: id-column is right for reverse FK, but not for forward FK or many-to-many
-                                       (let [forward-key      (first (get joins jk))
+                                       (let [forward-key (first (get joins jk))
                                              row-id      (if (forward? schema jk)
                                                            (get r forward-key)
                                                            (get r id-column))
