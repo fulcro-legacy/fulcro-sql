@@ -202,12 +202,16 @@
                               :account/name     "Mary"
                               :account/settings {}
                               :account/members  [{:db/id judy :person/name "Judy"}]}]
+          query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
+          expected-result-3 [{:db/id         gadget :item/name "gadget"
+                              :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
+                                              {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
           root-set          #{joe}
           source-table      :account]
       (assertions
         (core/run-query db test-schema :account/id query #{joe}) => [expected-result]
-        ;(core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
-        ))))
+        (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        (core/run-query db test-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
 
 (comment
   (do
