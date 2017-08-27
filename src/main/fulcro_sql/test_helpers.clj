@@ -21,7 +21,7 @@
                      {~dbkw (assoc ~(second binding)
                               :create-drop? true
                               :auto-migrate? true)}}}
-           dbs#    (atom (core/map->PostgreSQLDatabaseManager {:config config#}))]
+           dbs#    (atom (core/build-db-manager config#))]
        (try
          (swap! dbs# component/start)
          (let [~sym (core/get-dbspec (deref dbs#) ~dbkw)]

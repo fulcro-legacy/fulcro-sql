@@ -132,21 +132,40 @@
     (catch Exception e
       (timbre/error "Unable to create Hikari Datasource: " (.getMessage e)))))
 
-(defrecord PostgreSQLDatabaseManager [config connection-pools]
+(defmulti create-drop* (fn [db dbkey dbconfig] (get dbconfig :driver :default)))
+
+(defmethod create-drop* :default [db dbkey dbconfig]
+  (timbre/info "Create-drop was set. Cleaning everything out of the database " dbkey " (PostgreSQL).")
+  (jdbc/execute! db ["DROP SCHEMA PUBLIC CASCADE"])
+  (jdbc/execute! db ["CREATE SCHEMA PUBLIC"]))
+
+(defmethod create-drop* :mysql [db dbkey dbconfig]
+  (let [name (get dbconfig :database-name (name dbkey))]
+    (timbre/info "Create-drop was set. Cleaning everything out of the database " name " (MySQL).")
+    (jdbc/execute! db [(str "DROP DATABASE " name)])
+    (jdbc/execute! db [(str "CREATE DATABASE " name)])
+    (jdbc/execute! db [(str "USE " name)])
+    (timbre/info "Create-drop complete.")))
+
+(defrecord DatabaseManager [config connection-pools]
   component/Lifecycle
   (start [this]
     (timbre/debug "Ensuring PostgreSQL JDBC driver is loaded.")
     (Class/forName "org.postgresql.Driver")
     (let [databases (-> config :value :sqldbm)
-          ok?       (s/valid? ::sqldbm databases)
-          pools     (and ok?
+          valid?    (s/valid? ::sqldbm databases)
+          pools     (and valid?
                       (reduce (fn [pools [dbkey dbconfig]]
                                 (timbre/info (str "Creating connection pool for " dbkey))
                                 (assoc pools dbkey (create-pool (:hikaricp-config dbconfig)))) {} databases))
           result    (assoc this :connection-pools pools)]
-      (if ok?
-        (start-databases result)
-        (timbre/error "Unable to start SQL Databases. Configuration is invalid: " (s/explain ::sqldbm databases)))
+      (try
+        (if valid?
+          (start-databases result)
+          (timbre/error "Unable to start SQL Databases. Configuration is invalid: " (s/explain ::sqldbm databases)))
+        (catch Throwable t
+          (timbre/error "DATABASE STARTUP FAILED: " t)
+          (component/stop result)))
       result))
   (stop [this]
     (doseq [[k ^HikariDataSource p] connection-pools]
@@ -165,10 +184,7 @@
               (timbre/info (str "Processing migrations for " dbkey))
 
               (when-let [^Flyway flyway (when auto-migrate? (Flyway.))]
-                (when create-drop?
-                  (timbre/info "Create-drop was set. Cleaning everything out of the database.")
-                  (jdbc/execute! db ["DROP SCHEMA PUBLIC CASCADE"])
-                  (jdbc/execute! db ["CREATE SCHEMA PUBLIC"]))
+                (when create-drop? (create-drop* db dbkey dbconfig))
                 (timbre/info "Migration location is set to: " migrations)
                 (.setLocations flyway (into-array String migrations))
                 (.setDataSource flyway pool)
@@ -176,8 +192,21 @@
             (timbre/error (str "No pool for " dbkey ". Skipping migrations.")))))))
   (get-dbspec [this kw] (some->> connection-pools kw (assoc {} :datasource))))
 
+(defn build-db-manager
+  "Build a component that can manage you SQL database startup and stop."
+  [config] (map->DatabaseManager {:config config}))
+
 (defmulti next-id*
   (fn next-id-dispatch [db schema table] (get schema :driver :default)))
+
+(defmethod next-id* :mysql
+  [db schema table]
+  (assert (s/valid? ::schema schema) "Next-id requires a valid schema.")
+  (jdbc/with-db-transaction [db db]
+    (let [next-id (jdbc/query db ["SELECT AUTO_INCREMENT AS \"id\" FROM information_schema.TABLES WHERE TABLE_SCHEMA = database() AND TABLE_NAME = ?" (name table)]
+                    {:result-set-fn first :row-fn :id})]
+      (jdbc/execute! db [(str "ALTER TABLE " (name table) " AUTO_INCREMENT = " (inc next-id))])
+      next-id)))
 
 (defmethod next-id* :postgresql
   [db schema table]
@@ -490,15 +519,17 @@
   - Otherwise returns a vector of maps, one entry for each ID in root-id-set
   "
   [db {:keys [::joins ::graph->sql] :as schema} join-or-id-column query root-id-set]
-  (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
-        sql->graph    (set/map-invert graph->sql)
-        graph-results (clojure.walk/postwalk (fn [ele]
-                                               (cond
-                                                 (and (keyword? ele) (= "id" (name ele))) :db/id
-                                                 (keyword? ele) (get sql->graph ele ele)
-                                                 :else ele)) sql-results)
-        nquery        [{:tmp query}]
-        ndb           {:tmp graph-results}]
-    ; Leverage db->tree to filter out the cruft we've added to accomplish the joins
-    (:tmp (om/db->tree nquery ndb {}))))
+  (jdbc/with-db-transaction [db db]
+    (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
+          sql->graph    (set/map-invert graph->sql)
+          graph-results (clojure.walk/postwalk (fn [ele]
+                                                 (cond
+                                                   (and (keyword? ele) (= "id" (name ele))) :db/id
+                                                   (keyword? ele) (get sql->graph ele ele)
+                                                   :else ele)) sql-results)
+          nquery        [{:tmp query}]
+          ndb           {:tmp graph-results}]
+      ; Leverage db->tree to filter out the cruft we've added to accomplish the joins
+      (:tmp (om/db->tree nquery ndb {})))))
+
 

@@ -8,10 +8,16 @@
     [com.stuartsierra.component :as component]
     [clojure.java.jdbc :as jdbc]
     [clj-time.jdbc]
-    [taoensso.timbre :as timbre]))
+    [taoensso.timbre :as timbre])
+  (:import (com.cognitect.transit TaggedValue)))
 
 (def test-database {:hikaricp-config "test.properties"
                     :migrations      ["classpath:migrations/test"]})
+
+(def mysql-database {:hikaricp-config "mysqltest.properties"
+                     :driver          :mysql
+                     :database-name   "test"
+                     :migrations      ["classpath:migrations/mysqltest"]})
 
 (def test-schema {::core/graph->sql {:person/name                  :member/name
                                      :person/account               :member/account_id
@@ -25,17 +31,33 @@
                                      :invoice/items    (core/to-many [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id])
                                      :item/invoices    (core/to-many [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id])}
                   ::core/pks        {}})
+(def mysql-schema
+  (assoc test-schema
+    :driver :mysql
+    :database-name "test"))                                 ; needed for create/drop in mysql...there is no drop schema
 
 (specification "Database Component" :integration
   (behavior "Can create a functional database pool from HikariCP properties and Flyway migrations."
     (with-database [db test-database]
-      (let [result (jdbc/insert! db :account {:name "Tony"})
+      (let [result (jdbc/with-db-connection [con db] (jdbc/insert! con :account {:name "Tony"}))
             row    (first result)]
         (assertions
           (:name row) => "Tony")))))
 
-(specification "next-id" :integration
-  (behavior "Pulls a monotonically increasing ID from the database"
+(specification "next-id (MySQL)" :integration :mysql
+  (behavior "Pulls a monotonically increasing ID from the database (MySQL/MariaDB)"
+    (with-database [db mysql-database]
+      (let [a (core/next-id db mysql-schema :account)
+            b (core/next-id db mysql-schema :account)]
+        (assertions
+          "IDs are numeric integers > 0"
+          (> a 0) => true
+          (> b 0) => true
+          "IDs are increasing"
+          (> b a) => true)))))
+
+(specification "next-id (PostgreSQL)" :integration
+  (behavior "Pulls a monotonically increasing ID from the database (PostgreSQL)"
     (with-database [db test-database]
       (let [a (core/next-id db test-schema :account)
             b (core/next-id db test-schema :account)]
@@ -48,19 +70,20 @@
 
 (specification "seed!" :integration
   (with-database [db test-database]
-    (let [rows     [(core/seed-row :account {:id :id/joe :name "Joe"})
-                    (core/seed-row :member {:id :id/sam :account_id :id/joe :name "Sam"})
-                    (core/seed-update :account :id/joe {:last_edited_by :id/sam})]
-          {:keys [id/joe id/sam] :as tempids} (core/seed! db test-schema rows)
-          real-joe (jdbc/get-by-id db :account joe)
-          real-sam (jdbc/get-by-id db :member sam)]
-      (assertions
-        "Temporary IDs are returned for each row"
-        (pos? joe) => true
-        (pos? sam) => true
-        "The data is inserted into the database"
-        (:name real-joe) => "Joe"
-        (:last_edited_by real-joe) => sam))))
+    (jdbc/with-db-connection [db db]
+      (let [rows     [(core/seed-row :account {:id :id/joe :name "Joe"})
+                      (core/seed-row :member {:id :id/sam :account_id :id/joe :name "Sam"})
+                      (core/seed-update :account :id/joe {:last_edited_by :id/sam})]
+            {:keys [id/joe id/sam] :as tempids} (core/seed! db test-schema rows)
+            real-joe (jdbc/get-by-id db :account joe)
+            real-sam (jdbc/get-by-id db :member sam)]
+        (assertions
+          "Temporary IDs are returned for each row"
+          (pos? joe) => true
+          (pos? sam) => true
+          "The data is inserted into the database"
+          (:name real-joe) => "Joe"
+          (:last_edited_by real-joe) => sam)))))
 
 (specification "Table Detection: `table-for`"
   (let [schema {::core/pks        {}
@@ -180,7 +203,7 @@
                 (core/seed-row :invoice_items {:id :join-row-3 :invoice_id :id/invoice-2 :item_id :id/spanner :invoice_items/quantity 1})
                 (core/seed-row :invoice_items {:id :join-row-4 :invoice_id :id/invoice-2 :item_id :id/gadget :invoice_items/quantity 5})])
 
-(specification "Integration Tests for Graph Queries" :integration :focused
+(specification "Integration Tests for Graph Queries (PostgreSQL)" :integration
   (with-database [db test-database]
     (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db test-schema test-rows)
           query             [:db/id :account/name {:account/invoices [:db/id
@@ -212,6 +235,49 @@
         (core/run-query db test-schema :account/id query #{joe}) => [expected-result]
         (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
         (core/run-query db test-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
+
+(specification "MySQL Integration Tests" :integration :mysql
+  (with-database [db mysql-database]
+    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db mysql-schema test-rows)
+          query             [:db/id :account/name {:account/invoices [:db/id
+                                                                      ; TODO: data on join table
+                                                                      ;{:invoice/invoice_items [:invoice_items/quantity]}
+                                                                      {:invoice/items [:db/id :item/name]}]}]
+          expected-result   {:db/id            joe
+                             :account/name     "Joe"
+                             :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                {:db/id invoice-2 :invoice/items [{:db/id widget :item/name "widget"}
+                                                                                  {:db/id spanner :item/name "spanner"}
+                                                                                  {:db/id gadget :item/name "gadget"}]}]}
+          query-2           [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
+          expected-result-2 [{:db/id            joe
+                              :account/name     "Joe"
+                              :account/members  [{:db/id sam :person/name "Sam"}
+                                                 {:db/id sally :person/name "Sally"}]
+                              :account/settings {:db/id joe-settings :settings/auto-open? true}}
+                             {:db/id            mary
+                              :account/name     "Mary"
+                              :account/settings {}
+                              :account/members  [{:db/id judy :person/name "Judy"}]}]
+          query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
+          expected-result-3 [{:db/id         gadget :item/name "gadget"
+                              :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
+                                              {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
+          root-set          #{joe}
+          source-table      :account
+          fix-nums          (fn [result]
+                              (clojure.walk/postwalk
+                                (fn [ele]
+                                  (if (= java.math.BigInteger (type ele))
+                                    (long ele)
+                                    ele)) result))]
+      (assertions
+        "many-to-many (forward)"
+        (fix-nums (core/run-query db mysql-schema :account/id query #{joe})) => (fix-nums [expected-result])
+        "one-to-many query (forward)"
+        (core/run-query db mysql-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        "many-to-many (reverse)"
+        (core/run-query db mysql-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
 
 (comment
   (do
