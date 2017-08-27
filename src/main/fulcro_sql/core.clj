@@ -2,11 +2,14 @@
   (:require [clojure.string :as str]
             [clojure.spec.alpha :as s]
             [clojure.java.jdbc :as jdbc]
+            [clojure.pprint :refer [pprint]]
             [taoensso.timbre :as timbre]
             [clojure.spec.alpha :as s]
             [com.stuartsierra.component :as component]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.set :as set]
+            [om.next :as om])
   (:import (org.flywaydb.core Flyway)
            (com.zaxxer.hikari HikariConfig HikariDataSource)
            (java.util Properties)
@@ -19,12 +22,12 @@
 (s/def ::pks (s/and map?
                #(every? keyword? (keys %))
                #(every? keyword? (vals %))))
-(s/def ::om->sql (s/and map?
-                   #(every? keyword? (keys %))
-                   #(every? keyword? (vals %))))
+(s/def ::graph->sql (s/and map?
+                      #(every? keyword? (keys %))
+                      #(every? keyword? (vals %))))
 
 (s/def ::schema (s/keys
-                  :req [::pks ::om->sql ::joins]
+                  :req [::pks ::graph->sql ::joins]
                   :opt [::driver]))
 
 (defmulti sqlize* (fn sqlize-dispatch [schema kw] (get schema :driver :default)))
@@ -41,20 +44,27 @@
   [schema kw]
   (sqlize* schema kw))
 
+(defn omprop->sqlprop
+  "Derive an sqlprop from an om query element (prop or join)"
+  [{:keys [::graph->sql] :as schema} p]
+  (sqlize schema
+    (if (map? p)
+      (get graph->sql (ffirst p) (ffirst p))
+      (get graph->sql p p))))
+
 (defmulti table-for* (fn [schema query] (get schema :driver :default)))
 
 (defmethod table-for* :default
   [schema query]
-  (let [{:keys [om->sql]} schema
-        nses (reduce (fn
+  (let [nses (reduce (fn
                        ([] #{})
                        ([s p]
-                        (let [sql-prop (if (map? p) nil (get om->sql p p))
+                        (let [sql-prop (omprop->sqlprop schema p)
                               table-kw (some-> sql-prop namespace keyword)]
                           (cond
-                            (map? p) s
+                            (= :id sql-prop) s
                             (= :db/id sql-prop) s
-                            (and sql-prop table-kw) (conj s table-kw)
+                            table-kw (conj s table-kw)
                             :else s)))) #{} query)]
     (assert (= 1 (count nses)) (str "Could not determine a single table from the subquery " query))
     (sqlize schema (first nses))))
@@ -62,6 +72,7 @@
 (defn table-for
   "Scans the given Om query and tries to determine which table is to be used for the props within it."
   [schema query]
+  (assert (s/valid? ::schema schema) "Schema is valid")
   (table-for* schema query))
 
 (defn id-columns
@@ -71,24 +82,25 @@
             (conj cset (keyword (name table) (name pk))))
     #{} pks))
 
-(defmulti column-spec
-  "Get the column query specification for a given om prop. The omprop will be converted to an SQL :table/col property
-  that may be a scalar value on `table` or a join. If it is a join, it will only return a value if the join has
-  data on the `table` implied (e.g. isn't a reverse FK reference). "
-  (fn [schema omprop] (get schema ::driver :default)))
+(defmulti column-spec*
+  "Get the database-specific column query specification for a given SQL prop."
+  (fn [schema sqlprop] (get schema ::driver :default)))
 
-(defmethod column-spec :default
-  [{:keys [::om->sql ::joins] :as schema} omprop]
-  (let [id-columns             (id-columns schema)
-        sqlprop                (sqlize schema (get om->sql omprop omprop))
-        join                   (get joins sqlprop)
-        join-source-is-row-id? (some->> join first (contains? id-columns) boolean)
-        join-col               (first join)
-        [sqltable column target] (if (seq join)
-                                   [(namespace join-col) (name join-col) sqlprop]
-                                   [(namespace sqlprop) (name sqlprop) omprop])
-        as-name                (str (namespace target) "/" (name target))]
-    (str sqltable "." column " AS \"" as-name "\"")))
+(defmethod column-spec* :default
+  [schema sqlprop]
+  (let [table   (namespace sqlprop)
+        col     (name sqlprop)
+        as-name (str (namespace sqlprop) "/" (name sqlprop))]
+    (str table "." col " AS \"" as-name "\"")))
+
+(defn column-spec
+  "Returns a database-specific SQL property selection and AS clause for the given sql prop.
+
+  E.g.: (column-spec schema :account/name) => account.name AS \"account/name\"
+  "
+  [schema sqlprop]
+  (assert (s/valid? ::schema schema) "schema is valid")
+  (column-spec* schema sqlprop))
 
 (s/def ::migrations (s/and vector? #(every? string? %)))
 (s/def ::hikaricp-config string?)
@@ -120,21 +132,40 @@
     (catch Exception e
       (timbre/error "Unable to create Hikari Datasource: " (.getMessage e)))))
 
-(defrecord PostgreSQLDatabaseManager [config connection-pools]
+(defmulti create-drop* (fn [db dbkey dbconfig] (get dbconfig :driver :default)))
+
+(defmethod create-drop* :default [db dbkey dbconfig]
+  (timbre/info "Create-drop was set. Cleaning everything out of the database " dbkey " (PostgreSQL).")
+  (jdbc/execute! db ["DROP SCHEMA PUBLIC CASCADE"])
+  (jdbc/execute! db ["CREATE SCHEMA PUBLIC"]))
+
+(defmethod create-drop* :mysql [db dbkey dbconfig]
+  (let [name (get dbconfig :database-name (name dbkey))]
+    (timbre/info "Create-drop was set. Cleaning everything out of the database " name " (MySQL).")
+    (jdbc/execute! db [(str "DROP DATABASE " name)])
+    (jdbc/execute! db [(str "CREATE DATABASE " name)])
+    (jdbc/execute! db [(str "USE " name)])
+    (timbre/info "Create-drop complete.")))
+
+(defrecord DatabaseManager [config connection-pools]
   component/Lifecycle
   (start [this]
     (timbre/debug "Ensuring PostgreSQL JDBC driver is loaded.")
     (Class/forName "org.postgresql.Driver")
     (let [databases (-> config :value :sqldbm)
-          ok?       (s/valid? ::sqldbm databases)
-          pools     (and ok?
+          valid?    (s/valid? ::sqldbm databases)
+          pools     (and valid?
                       (reduce (fn [pools [dbkey dbconfig]]
                                 (timbre/info (str "Creating connection pool for " dbkey))
                                 (assoc pools dbkey (create-pool (:hikaricp-config dbconfig)))) {} databases))
           result    (assoc this :connection-pools pools)]
-      (if ok?
-        (start-databases result)
-        (timbre/error "Unable to start SQL Databases. Configuration is invalid: " (s/explain ::sqldbm databases)))
+      (try
+        (if valid?
+          (start-databases result)
+          (timbre/error "Unable to start SQL Databases. Configuration is invalid: " (s/explain ::sqldbm databases)))
+        (catch Throwable t
+          (timbre/error "DATABASE STARTUP FAILED: " t)
+          (component/stop result)))
       result))
   (stop [this]
     (doseq [[k ^HikariDataSource p] connection-pools]
@@ -153,10 +184,7 @@
               (timbre/info (str "Processing migrations for " dbkey))
 
               (when-let [^Flyway flyway (when auto-migrate? (Flyway.))]
-                (when create-drop?
-                  (timbre/info "Create-drop was set. Cleaning everything out of the database.")
-                  (jdbc/execute! db ["DROP SCHEMA PUBLIC CASCADE"])
-                  (jdbc/execute! db ["CREATE SCHEMA PUBLIC"]))
+                (when create-drop? (create-drop* db dbkey dbconfig))
                 (timbre/info "Migration location is set to: " migrations)
                 (.setLocations flyway (into-array String migrations))
                 (.setDataSource flyway pool)
@@ -164,10 +192,23 @@
             (timbre/error (str "No pool for " dbkey ". Skipping migrations.")))))))
   (get-dbspec [this kw] (some->> connection-pools kw (assoc {} :datasource))))
 
+(defn build-db-manager
+  "Build a component that can manage you SQL database startup and stop."
+  [config] (map->DatabaseManager {:config config}))
+
 (defmulti next-id*
   (fn next-id-dispatch [db schema table] (get schema :driver :default)))
 
-(defmethod next-id* :default
+(defmethod next-id* :mysql
+  [db schema table]
+  (assert (s/valid? ::schema schema) "Next-id requires a valid schema.")
+  (jdbc/with-db-transaction [db db]
+    (let [next-id (jdbc/query db ["SELECT AUTO_INCREMENT AS \"id\" FROM information_schema.TABLES WHERE TABLE_SCHEMA = database() AND TABLE_NAME = ?" (name table)]
+                    {:result-set-fn first :row-fn :id})]
+      (jdbc/execute! db [(str "ALTER TABLE " (name table) " AUTO_INCREMENT = " (inc next-id))])
+      next-id)))
+
+(defmethod next-id* :postgresql
   [db schema table]
   (assert (s/valid? ::schema schema) "Next-id requires a valid schema.")
   (let [pk      (get-in schema [::pks table] :id)
@@ -175,6 +216,10 @@
     (jdbc/query db [(str "SELECT nextval('" seqname "') AS \"id\"")]
       {:result-set-fn first
        :row-fn        :id})))
+
+(defmethod next-id* :default
+  [db schema table]
+  (next-id* db (assoc schema :driver :postgresql) table))
 
 (defn next-id
   "Get the next generated ID for the given table.
@@ -225,8 +270,22 @@
   [table id value]
   (with-meta value {:update id :table table}))
 
-(defn pk-column [schema table]
+(defn join-key
+  "Returns the key in a join. E.g. for {:k [...]} it returns :k"
+  [join] (ffirst join))
+(defn join-query
+  "Returns the subquery of a join. E.g. for {:k [:data]} it returns [:data]."
+  [join] (-> join first second))
+
+(defn pk-column
+  "Returns the SQL column for a given table's primary key"
+  [schema table]
   (get-in schema [::pks table] :id))
+
+(defn id-prop
+  "Returns the SQL-centric property for the PK in a result set map (before conversion back to Om)"
+  [schema table]
+  (keyword (name table) (name (pk-column schema table))))
 
 (defn seed!
   "Seed the given seed-row and seed-update items into the given database. Returns a map whose values will be the
@@ -265,3 +324,212 @@
             (timbre/debug "inserting " real-row)
             (jdbc/insert! db table real-row)))))
     tempid-map))
+
+(defn query-element->sqlprop
+  [{:keys [::joins] :as schema} element]
+  (let [omprop                 (if (map? element) (ffirst element) element)
+        id-columns             (id-columns schema)
+        sql-prop               (omprop->sqlprop schema omprop)
+        join                   (get joins sql-prop)
+        join-source-is-row-id? (some->> join first (contains? id-columns) boolean)
+        join-col               (first join)
+        join-prop              (when join-col (omprop->sqlprop schema join-col))]
+    (cond
+      (= "id" (name sql-prop)) nil
+      join-prop join-prop
+      :else sql-prop)))
+
+(defn columns-for
+  "Returns an SQL-centric set of properties at the top level of the given graph query. It does not follow joins, but
+  does include any columns that would be necessary to process the given joins. It will always include the row ID."
+  [schema graph-query]
+  (assert (s/valid? ::schema schema) "Schema is valid")
+  (let [table  (table-for schema graph-query)
+        pk     (get-in schema [::pks table] :id)
+        id-col (keyword (name table) (name pk))]
+    (reduce
+      (fn [rv ele]
+        (if-let [prop (query-element->sqlprop schema ele)]
+          (conj rv prop)
+          rv)) #{id-col} graph-query)))
+
+(defn str-idcol
+  "Returns the SQL string for the ID column of the given (keyword) table. E.g. :account -> account.id"
+  [schema table]
+  (str (name table) "." (name (pk-column schema table))))
+
+(defn str-col
+  "Returns the SQL string for the given sqlprop. E.g. :a/b -> a.b"
+  [prop]
+  (str (namespace prop) "." (name prop)))
+
+(defn sqlprop-for-join
+  "Returns the sqlprop column needed from the source table."
+  [{:keys [::joins] :as schema} join]
+  (let [jk               (omprop->sqlprop schema (ffirst join))
+        join-description (get joins jk)]
+    (first join-description)))
+
+(defn query-for
+  "Returns an SQL query to get the true data columns that exist for the graph-query. Joins will contribute to this
+  query iff there is a column on the target table that is needed in order to process the join.
+
+  graph-join-prop : nil if the id-set is on the table of this query itself, otherwise the fulcro query keyword that was used to follow a join.
+  graph-query : the things to pull from the databsae. Table will be derived from this, so you must pull more than just the ID.
+  id-set : The ids of the rows you want to pull. If join-col is set, that will be the join column matched against these. Otherwise the PK of the table."
+  ([{:keys [::joins] :as schema} graph-join-prop graph-query id-set]
+   (assert (vector? graph-query) "Om query is a vector: ")
+   (assert (or (nil? graph-join-prop) (keyword? graph-join-prop)) "join column is a keyword")
+   (assert (set? id-set) "id-set is a set")
+   (let [table                (table-for schema graph-query)
+         join-cols-to-include (->> graph-query
+                                (filter map?)
+                                (keep (partial sqlprop-for-join schema)))
+         join-path            (get joins graph-join-prop)
+         sql-join-column      (second join-path)
+         columns              (apply sorted-set (concat (columns-for schema graph-query) join-cols-to-include))
+         columns              (if sql-join-column (conj columns sql-join-column) columns)
+         column-selectors     (map #(column-spec schema %) columns)
+         selectors            (str/join "," column-selectors)
+         table-name           (name table)
+         ids                  (str/join "," (map str (keep identity id-set)))
+         has-join-table?      (> (count join-path) 2)
+         id-col               (if sql-join-column
+                                (str-col sql-join-column)
+                                (str-idcol schema table))
+         sql                  (if has-join-table?
+                                (let [left-table  (-> join-path second namespace)
+                                      right-table (-> join-path last namespace)
+                                      col-left    (-> join-path (nth 2) str-col)
+                                      col-right   (-> join-path (nth 3) str-col)
+                                      filter-col  (-> join-path second str-col)
+                                      from-clause (str "FROM " left-table " INNER JOIN " right-table " ON " col-left " = " col-right)
+                                      ids         (str/join "," id-set)]
+                                  (str "SELECT " selectors " " from-clause " WHERE " filter-col " IN (" ids ")"))
+                                (str "SELECT " selectors " FROM " table-name " WHERE " id-col " IN (" ids ")"))]
+     sql)))
+
+(defn to-one [join-seq]
+  (assert (and (vector? join-seq) (every? keyword? join-seq)) "join sequence is a vector of keywords")
+  (vary-meta join-seq assoc :arity :to-one))
+
+(defn to-many [join-seq]
+  (assert (and (vector? join-seq) (every? keyword? join-seq)) "join sequence is a vector of keywords")
+  (vary-meta join-seq assoc :arity :to-many))
+
+(defn to-one?
+  "Is the give join to-one? Returns true iff the join is marked to-one."
+  [join]
+  (= :to-one (some-> join meta :arity)))
+
+(defn to-many?
+  "Is the given join to-many? Returns true if the join is marked to many, or if the join is unmarked (e.g. default)"
+  [join]
+  (or (= :to-many (some-> join meta :arity)) (not (to-one? join))))
+
+(defn reverse?
+  "Opposite of forward?"
+  [{:keys [::joins] :as schema} graph-key-or-join]
+  (let [graph-join-prop (if (map? graph-key-or-join) (join-key graph-key-or-join)
+                                                     graph-key-or-join)
+        join-sequence   (get joins graph-join-prop)
+        source-table    (keyword (namespace graph-join-prop))
+        source-pk-col   (pk-column schema source-table)
+        source-pk       (keyword (name source-table) (name source-pk-col))
+        join-start      (first join-sequence)]
+    (= join-start source-pk)))
+
+(defn forward?
+  "Returns true if the join key is on the source table (as opposed to the target table)"
+  [schema graph-join]
+  (not (reverse? schema graph-join)))
+
+(defn uses-join-table?
+  "Returns true if the join has a join table"
+  [{:keys [::joins] :as schema} graph-key-or-join]
+  (let [graph-join-prop (if (map? graph-key-or-join) (join-key graph-key-or-join)
+                                                     graph-key-or-join)
+        join-sequence   (get joins graph-join-prop)
+        ]
+    (= 4 (count join-sequence))))
+
+(defn- run-query*
+  [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
+  (assert (s/valid? ::schema schema) "schema is valid")
+  (let [is-join?                 (contains? joins join-or-id-column)
+        join-path                (get joins join-or-id-column [])
+        id-column                (if is-join? (second join-path) join-or-id-column)
+        is-to-one?               (to-one? join-path)
+        query-joins              (keep #(when (map? %) %) query)
+        sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
+        rows                     (jdbc/query db [sql])
+        get-root-set             (fn [join]
+                                   (let [join-key      (ffirst join)
+                                         join-sequence (get joins join-key [])
+                                         root-set-prop (first join-sequence)]
+                                     (if root-set-prop
+                                       (reduce (fn [s row] (conj s (get row root-set-prop))) #{} rows)
+                                       #{})))
+        join-results             (reduce
+                                   (fn [acc query-join]
+                                     (let [results         (run-query* db schema (join-key query-join) (join-query query-join) (get-root-set query-join))
+                                           join-sequence   (get joins (join-key query-join))
+                                           is-to-one?      (to-one? join-sequence)
+                                           fkid-col        (second join-sequence)
+                                           grouped-results (group-by fkid-col results)
+                                           grouped-results (if is-to-one?
+                                                             {(get results fkid-col) results}
+                                                             grouped-results)]
+                                       (assoc acc (join-key query-join) grouped-results)))
+                                   {}
+                                   query-joins)
+        join-row-to-join-results (fn [row]
+                                   (reduce
+                                     (fn [r [jk grouped-results]]
+                                       ; FIXME: id-column is right for reverse FK, but not for forward FK or many-to-many
+                                       (let [join-path   (get joins jk)
+                                             forward-key (first join-path)
+                                             row-key     (cond
+                                                           (uses-join-table? schema jk) forward-key
+                                                           (forward? schema jk) forward-key
+                                                           :else id-column)
+                                             row-id      (get r row-key)
+                                             join-result (get grouped-results row-id)]
+                                         (if (and join-result (seq join-result))
+                                           (assoc r jk join-result)
+                                           r)))
+                                     row join-results))
+        final-results            (map join-row-to-join-results rows)]
+    (if is-to-one?
+      (first final-results)
+      (vec final-results))))
+
+(defn run-query
+  "Run a graph query against an SQL database.
+
+  db - the database
+  schema - the schema
+  join-or-id-column - The ID column of the table (being queried) corresponding to root-id-set OR the join column
+                      whose second join component corresponds to the IDs in root-id-set.
+  query - The query to run
+  root-id-set - A set of PK values that identify the row(s) that root your graph query
+
+  Returns:
+  - IF the join-or-id-column is a to-one join: returns a map
+  - Otherwise returns a vector of maps, one entry for each ID in root-id-set
+  "
+  [db {:keys [::joins ::graph->sql] :as schema} join-or-id-column query root-id-set]
+  (jdbc/with-db-transaction [db db]
+    (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
+          sql->graph    (set/map-invert graph->sql)
+          graph-results (clojure.walk/postwalk (fn [ele]
+                                                 (cond
+                                                   (and (keyword? ele) (= "id" (name ele))) :db/id
+                                                   (keyword? ele) (get sql->graph ele ele)
+                                                   :else ele)) sql-results)
+          nquery        [{:tmp query}]
+          ndb           {:tmp graph-results}]
+      ; Leverage db->tree to filter out the cruft we've added to accomplish the joins
+      (:tmp (om/db->tree nquery ndb {})))))
+
+
