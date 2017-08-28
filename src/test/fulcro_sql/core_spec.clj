@@ -193,14 +193,15 @@
     (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
     (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")))
 
-(def test-rows [(core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
+(def test-rows [; basic to-one and to-many
+                (core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
                 (core/seed-row :account {:id :id/joe :name "Joe" :settings_id :id/joe-settings})
                 (core/seed-row :account {:id :id/mary :name "Mary"})
-                (core/seed-update :account :id/joe {:spouse_id :id/mary})
-                (core/seed-update :account :id/mary {:spouse_id :id/joe})
                 (core/seed-row :member {:id :id/sam :name "Sam" :account_id :id/joe})
                 (core/seed-row :member {:id :id/sally :name "Sally" :account_id :id/joe})
                 (core/seed-row :member {:id :id/judy :name "Judy" :account_id :id/mary})
+
+                ; many-to-many
                 (core/seed-row :invoice {:id :id/invoice-1 :account_id :id/joe :invoice_date (tm/date-time 2017 03 04)})
                 (core/seed-row :invoice {:id :id/invoice-2 :account_id :id/joe :invoice_date (tm/date-time 2016 01 02)})
                 (core/seed-row :item {:id :id/gadget :name "gadget"})
@@ -211,6 +212,11 @@
                 (core/seed-row :invoice_items {:id :join-row-3 :invoice_id :id/invoice-2 :item_id :id/spanner :invoice_items/quantity 1})
                 (core/seed-row :invoice_items {:id :join-row-4 :invoice_id :id/invoice-2 :item_id :id/gadget :invoice_items/quantity 5})
 
+                ; graph loop
+                (core/seed-update :account :id/joe {:spouse_id :id/mary})
+                (core/seed-update :account :id/mary {:spouse_id :id/joe})
+
+                ; non-looping recursion with some depth
                 (core/seed-row :todo_list {:id :list-1 :name "Things to do"})
                 (core/seed-row :todo_list_item {:id :item-1 :label "A" :todo_list_id :list-1})
                 (core/seed-row :todo_list_item {:id :item-1-1 :label "A.1" :parent_item_id :item-1})
