@@ -233,23 +233,31 @@
                                   :account/members  [{:db/id sam :person/name "Sam"}
                                                      {:db/id sally :person/name "Sally"}]
                                   :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                                 {:db/id            mary
-                                  :account/name     "Mary"
-                                  :account/settings {}
-                                  :account/members  [{:db/id judy :person/name "Judy"}]}]
+                                 {:db/id           mary
+                                  :account/name    "Mary"
+                                  :account/members [{:db/id judy :person/name "Judy"}]}]
           query-3               [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3     [{:db/id         gadget :item/name "gadget"
                                   :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
                                                   {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
           root-set              #{joe}
           recursive-query       '[:db/id :todo_list/name {:todo_list/items [:db/id :todo_list_item/label {:todo_list_item/subitems 3}]}]
-          recursive-expectation [{}]
+          recursive-expectation [{:db/id list-1 :todo_list/name "Things to do" :todo_list/items
+                                         [{:db/id                   item-1 :todo_list_item/label "A"
+                                           :todo_list_item/subitems [{:db/id                   item-1-1 :todo_list_item/label "A.1"
+                                                                      :todo_list_item/subitems [{:db/id item-1-1-1 :todo_list_item/label "A.1.1"}]}]}
+                                          {:db/id                   item-2 :todo_list_item/label "B"
+                                           :todo_list_item/subitems [{:db/id item-2-1 :todo_list_item/label "B.1"} {:db/id item-2-2 :todo_list_item/label "B.2"}]}]}]
           source-table          :account]
       (assertions
-        ;(core/run-query db test-schema :account/id query #{joe}) => [expected-result]
-        ;(core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        "to-many"
+        (core/run-query db test-schema :account/id query #{joe}) => [expected-result]
+        "parallel subjoins"
+        (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        "recursion"
         (core/run-query db test-schema :todo_list/id recursive-query (sorted-set list-1)) => recursive-expectation
-        ;(core/run-query db test-schema :account/id query-3 (sorted-set gadget)) => expected-result-3
+        "reverse many-to-many"
+        (core/run-query db test-schema :account/id query-3 (sorted-set gadget)) => expected-result-3
         ))))
 
 (specification "MySQL Integration Tests" :mysql

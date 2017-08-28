@@ -9,7 +9,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.set :as set]
-            [om.next :as om])
+            [om.next :as om]
+            [om.util :as util])
   (:import (org.flywaydb.core Flyway)
            (com.zaxxer.hikari HikariConfig HikariDataSource)
            (java.util Properties)
@@ -434,7 +435,7 @@
                                                      graph-key-or-join)
         join-sequence   (get joins graph-join-prop)
         source-table    (keyword (namespace (first join-sequence)))
-        target-table (keyword (namespace (second join-sequence))) ]
+        target-table    (keyword (namespace (second join-sequence)))]
     (= source-table target-table)))
 
 (defn reverse?
@@ -485,7 +486,7 @@
                                      (fn [acc query-join]
                                        ; FIXME: recursive queries need loop detection
                                        (let [subquery        (join-query query-join)
-                                             recursive? (or (= subquery '...) (integer? subquery))
+                                             recursive?      (or (= subquery '...) (integer? subquery))
                                              real-query      (if recursive?
                                                                query
                                                                subquery)
@@ -523,6 +524,24 @@
         (first final-results)
         (vec final-results)))))
 
+(defn strip-join-columns [query graph-result]
+  (if (vector? graph-result)
+    (mapv #(strip-join-columns query %) graph-result)
+    (let [legal-keys   (keep (fn [ele] (if (map? ele) (ffirst ele) ele)) query)
+          this-result  (select-keys graph-result legal-keys)
+          final-result (reduce (fn [r query-ele]
+                                 (let [is-join?   (map? query-ele)
+                                       key        (if is-join? (join-key query-ele) query-ele)
+                                       subquery   (and is-join? (join-query query-ele))
+                                       subquery   (if (util/recursion? subquery) query subquery)
+                                       join-value (get r key)
+                                       to-many?   (and is-join? (vector? join-value))]
+                                   (cond
+                                     (and to-many? join-value) (assoc r key (mapv (fn [v] (strip-join-columns subquery v)) join-value))
+                                     (and is-join? join-value) (assoc r key (strip-join-columns subquery join-value))
+                                     :else r))) this-result query)]
+      final-result)))
+
 (defn run-query
   "Run a graph query against an SQL database.
 
@@ -546,13 +565,9 @@
                                                    (cond
                                                      (and (keyword? ele) (= "id" (name ele))) :db/id
                                                      (keyword? ele) (get sql->graph ele ele)
-                                                     :else ele)) sql-results)
-            nquery        [{:tmp query}]
-            ndb           {:tmp graph-results}]
-        ; Leverage db->tree to filter out the cruft we've added to accomplish the joins
-        graph-results ;sql-results
-        ; FIXME: db->tree not working with recursive queries???
-        #_(:tmp (om/db->tree nquery ndb {}))))
+                                                     :else ele)) sql-results)]
+        (println :q query :g graph-results)
+        (strip-join-columns query graph-results)))
     (catch Throwable t
       (timbre/error "Graph query failed: " t)
       (.printStackTrace t))))
