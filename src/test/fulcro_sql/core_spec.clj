@@ -44,7 +44,7 @@
         (assertions
           (:name row) => "Tony")))))
 
-(specification "next-id (MySQL)" :integration :mysql
+(specification "next-id (MySQL)" :mysql
   (behavior "Pulls a monotonically increasing ID from the database (MySQL/MariaDB)"
     (with-database [db mysql-database]
       (let [a (core/next-id db mysql-schema :account)
@@ -203,7 +203,7 @@
                 (core/seed-row :invoice_items {:id :join-row-3 :invoice_id :id/invoice-2 :item_id :id/spanner :invoice_items/quantity 1})
                 (core/seed-row :invoice_items {:id :join-row-4 :invoice_id :id/invoice-2 :item_id :id/gadget :invoice_items/quantity 5})])
 
-(specification "Integration Tests for Graph Queries (PostgreSQL)" :integration
+(specification "Integration Tests for Graph Queries (PostgreSQL)" :integration :focused
   (with-database [db test-database]
     (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db test-schema test-rows)
           query             [:db/id :account/name {:account/invoices [:db/id
@@ -236,7 +236,7 @@
         (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
         (core/run-query db test-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
 
-(specification "MySQL Integration Tests" :integration :mysql
+(specification "MySQL Integration Tests" :mysql
   (with-database [db mysql-database]
     (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db mysql-schema test-rows)
           query             [:db/id :account/name {:account/invoices [:db/id

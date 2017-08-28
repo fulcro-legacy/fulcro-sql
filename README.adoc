@@ -395,6 +395,41 @@ Note that all of the examples above are the `:default` behavior, so if your driv
 the next ID behavior, then you can choose to leave the others as they are and only `defmethod` a dispatch
 for your override(s).
 
+== Performance
+
+The algorithm used by this library runs relatively simple queries, and does the joins in-memory. It tries to be relatively
+efficient by processing a join via a single query that pull rows by the IDs of all of the parent rows that join to it.
+
+Thus, a query like this:
+
+```
+[:db/id :account/name {:account/members [:db/id :member/name]}]
+```
+
+(with `member` being the table with the FK) will issue:
+
+```
+SELECT id, name FROM account;
+```
+
+to collect all of the `ids` at that level of the query, and then issue:
+
+```
+SELECT id, name FROM member WHERE account_id IN (...)
+```
+
+to get the joined rows, and then join the results in memory. This is a recursive algorithm with each level passing
+the row IDs found at the higher level down through the graph of queries. This means that a join three levels deep will only issue
+three queries independent of the number of rows returned at each level.
+
+Of course, a graph query can have more of a tree-like shape, and each join will result in one query (overall). Technically
+this means that a graph query can result in an exponential growth of the actual SQL statements; however,
+in practice a typical graph query will not actually contain that many branches nor be that deep.
+
+It is important for your SQL database to have indexes on all foreign keys. This algorithm assumes it will be fast
+to run a query with a `WHERE x IN set` as the only filter criteria. This algorithm also assumes that there is no
+(practical) limit on the number of things that can be asked for with SQL `IN`.
+
 == Contributing to Fulcro-SQL Development
 
 Please join the `#fulcro` Slack channel in http://clojurians.slack.com. Discuss how you'd like to help.
