@@ -45,6 +45,20 @@
   [schema kw]
   (sqlize* schema kw))
 
+(defmulti omize* (fn omize-dispatch [schema kw] (get schema :driver :default)))
+
+(defmethod omize* :default [schema kw]
+  (let [nspc (some-> kw namespace (str/replace "_" "-"))
+        nm   (some-> kw name (str/replace "_" "-"))]
+    (if nspc
+      (keyword nspc nm)
+      (keyword nm))))
+
+(defn omize
+  "Convert a keyword in clojure-form to sql-form. E.g. :account-id to :account_id"
+  [schema kw]
+  (omize* schema kw))
+
 (defn omprop->sqlprop
   "Derive an sqlprop from an om query element (prop or join)"
   [{:keys [::graph->sql] :as schema} p]
@@ -331,7 +345,7 @@
   (let [omprop                 (if (map? element) (ffirst element) element)
         id-columns             (id-columns schema)
         sql-prop               (omprop->sqlprop schema omprop)
-        join                   (get joins sql-prop)
+        join                   (get joins omprop)
         join-source-is-row-id? (some->> join first (contains? id-columns) boolean)
         join-col               (first join)
         join-prop              (when join-col (omprop->sqlprop schema join-col))]
@@ -514,7 +528,6 @@
                                                              :else id-column)
                                                row-id      (get r row-key)
                                                join-result (get grouped-results row-id)]
-                                           (println :gr grouped-results :jk jk :jr join-result :jp join-path :rk row-key :row-id row-id :r row)
                                            (if (and join-result (seq join-result))
                                              (assoc r jk join-result)
                                              r)))
@@ -524,7 +537,10 @@
         (first final-results)
         (vec final-results)))))
 
-(defn strip-join-columns [query graph-result]
+(defn strip-join-columns
+  "Walk the query and graph result, removing any join columns that were part of query processing, but were not asked
+  for in the original query."
+  [query graph-result]
   (if (vector? graph-result)
     (mapv #(strip-join-columns query %) graph-result)
     (let [legal-keys   (keep (fn [ele] (if (map? ele) (ffirst ele) ele)) query)
@@ -564,9 +580,8 @@
             graph-results (clojure.walk/postwalk (fn [ele]
                                                    (cond
                                                      (and (keyword? ele) (= "id" (name ele))) :db/id
-                                                     (keyword? ele) (get sql->graph ele ele)
+                                                     (keyword? ele) (omize schema (get sql->graph ele ele))
                                                      :else ele)) sql-results)]
-        (println :q query :g graph-results)
         (strip-join-columns query graph-results)))
     (catch Throwable t
       (timbre/error "Graph query failed: " t)
