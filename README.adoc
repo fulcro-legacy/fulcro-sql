@@ -151,7 +151,7 @@ These default to `:id`, so technically you only need them if you used something 
 The `graph->sql` map is just one stage of the property mapping. The complete property transform process is:
 
 1. Look up the graph property in `::core/graph->sql`, if present.
-2. The result of step (1) is processed by the multimethod `sqlize*`, dispatched by the `:driver` in your
+2. The result of step (1) is processed by the multimethod `graphprop->sqlprop*`, dispatched by the `:driver` in your
 config. The default transform just replaces `-` with `_`.
 
 ==== Support for to-one:
@@ -374,8 +374,10 @@ and see messages from the underlying connection pool and migration libraries.
 Fulcro-SQL is built to be customizable. Each of the core processes is defined by a multimethod that
 dispatches on the `:driver` key of the database's config (if provided).
 
-`(sqlize* schema prop)` - Called after the initial remapping from `::core/graph->sql`. This multimethod
+`(graphprop->sqlprop* schema prop)` - Called after the initial remapping from `::core/graph->sql`. This multimethod
 can remap `prop` to an alternate form. The default just converts hypens to underscores.
+`(sqlprop->graphprop* schema prop)` - Called after the unmapping (`map-invert`) `::core/graph->sql` explicit renames. This multimethod
+can remap an `sqlprop` back to an original form. The default just converts underscores back to hypens.
 `(table-for* schema query)` - Must return the database table name as a keyword (e.g. `:account`) for the given
 (top-level) of a graph query (e.g. `[:db/id :account/name {:account/members ...}]`).
 `(column-spec* schema sqlprop)` - Returns an SQL column selection that will result in clojure.java.jdbc query
