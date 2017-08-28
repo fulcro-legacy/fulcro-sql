@@ -427,6 +427,16 @@
   [join]
   (or (= :to-many (some-> join meta :arity)) (not (to-one? join))))
 
+(defn recursive?
+  "Is this a self-reference join?"
+  [{:keys [::joins] :as schema} graph-key-or-join]
+  (let [graph-join-prop (if (map? graph-key-or-join) (join-key graph-key-or-join)
+                                                     graph-key-or-join)
+        join-sequence   (get joins graph-join-prop)
+        source-table    (keyword (namespace (first join-sequence)))
+        target-table (keyword (namespace (second join-sequence))) ]
+    (= source-table target-table)))
+
 (defn reverse?
   "Opposite of forward?"
   [{:keys [::joins] :as schema} graph-key-or-join]
@@ -456,53 +466,62 @@
 (defn- run-query*
   [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
   (assert (s/valid? ::schema schema) "schema is valid")
-  (let [is-join?                 (contains? joins join-or-id-column)
-        join-path                (get joins join-or-id-column [])
-        id-column                (if is-join? (second join-path) join-or-id-column)
-        is-to-one?               (to-one? join-path)
-        query-joins              (keep #(when (map? %) %) query)
-        sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
-        rows                     (jdbc/query db [sql])
-        get-root-set             (fn [join]
-                                   (let [join-key      (ffirst join)
-                                         join-sequence (get joins join-key [])
-                                         root-set-prop (first join-sequence)]
-                                     (if root-set-prop
-                                       (reduce (fn [s row] (conj s (get row root-set-prop))) #{} rows)
-                                       #{})))
-        join-results             (reduce
-                                   (fn [acc query-join]
-                                     (let [results         (run-query* db schema (join-key query-join) (join-query query-join) (get-root-set query-join))
-                                           join-sequence   (get joins (join-key query-join))
-                                           is-to-one?      (to-one? join-sequence)
-                                           fkid-col        (second join-sequence)
-                                           grouped-results (group-by fkid-col results)
-                                           grouped-results (if is-to-one?
-                                                             {(get results fkid-col) results}
-                                                             grouped-results)]
-                                       (assoc acc (join-key query-join) grouped-results)))
-                                   {}
-                                   query-joins)
-        join-row-to-join-results (fn [row]
-                                   (reduce
-                                     (fn [r [jk grouped-results]]
-                                       ; FIXME: id-column is right for reverse FK, but not for forward FK or many-to-many
-                                       (let [join-path   (get joins jk)
-                                             forward-key (first join-path)
-                                             row-key     (cond
-                                                           (uses-join-table? schema jk) forward-key
-                                                           (forward? schema jk) forward-key
-                                                           :else id-column)
-                                             row-id      (get r row-key)
-                                             join-result (get grouped-results row-id)]
-                                         (if (and join-result (seq join-result))
-                                           (assoc r jk join-result)
-                                           r)))
-                                     row join-results))
-        final-results            (map join-row-to-join-results rows)]
-    (if is-to-one?
-      (first final-results)
-      (vec final-results))))
+  (when (seq root-id-set)
+    (let [is-join?                 (contains? joins join-or-id-column)
+          join-path                (get joins join-or-id-column [])
+          id-column                (if is-join? (second join-path) join-or-id-column)
+          is-to-one?               (to-one? join-path)
+          query-joins              (keep #(when (map? %) %) query)
+          sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
+          rows                     (jdbc/query db [sql])
+          get-root-set             (fn [join]
+                                     (let [join-key      (ffirst join)
+                                           join-sequence (get joins join-key [])
+                                           root-set-prop (first join-sequence)]
+                                       (if root-set-prop
+                                         (reduce (fn [s row] (conj s (get row root-set-prop))) #{} rows)
+                                         #{})))
+          join-results             (reduce
+                                     (fn [acc query-join]
+                                       ; FIXME: recursive queries need loop detection
+                                       (let [subquery        (join-query query-join)
+                                             recursive? (or (= subquery '...) (integer? subquery))
+                                             real-query      (if recursive?
+                                                               query
+                                                               subquery)
+                                             results         (run-query* db schema (join-key query-join) real-query (get-root-set query-join))
+                                             join-sequence   (get joins (join-key query-join))
+                                             is-to-one?      (to-one? join-sequence)
+                                             fkid-col        (second join-sequence)
+                                             grouped-results (group-by fkid-col results)
+                                             grouped-results (if is-to-one?
+                                                               {(get results fkid-col) results}
+                                                               grouped-results)]
+                                         (assoc acc (join-key query-join) grouped-results)))
+                                     {}
+                                     query-joins)
+          join-row-to-join-results (fn [row]
+                                     (reduce
+                                       (fn [r [jk grouped-results]]
+                                         (let [join-path   (get joins jk)
+                                               forward-key (first join-path)
+                                               row-key     (cond
+                                                             ; FIXME: on recursion, we're picking the wrong row key
+                                                             (uses-join-table? schema jk) forward-key
+                                                             (forward? schema jk) forward-key
+                                                             (recursive? schema jk) forward-key
+                                                             :else id-column)
+                                               row-id      (get r row-key)
+                                               join-result (get grouped-results row-id)]
+                                           (println :gr grouped-results :jk jk :jr join-result :jp join-path :rk row-key :row-id row-id :r row)
+                                           (if (and join-result (seq join-result))
+                                             (assoc r jk join-result)
+                                             r)))
+                                       row join-results))
+          final-results            (map join-row-to-join-results rows)]
+      (if is-to-one?
+        (first final-results)
+        (vec final-results)))))
 
 (defn run-query
   "Run a graph query against an SQL database.
@@ -519,17 +538,23 @@
   - Otherwise returns a vector of maps, one entry for each ID in root-id-set
   "
   [db {:keys [::joins ::graph->sql] :as schema} join-or-id-column query root-id-set]
-  (jdbc/with-db-transaction [db db]
-    (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
-          sql->graph    (set/map-invert graph->sql)
-          graph-results (clojure.walk/postwalk (fn [ele]
-                                                 (cond
-                                                   (and (keyword? ele) (= "id" (name ele))) :db/id
-                                                   (keyword? ele) (get sql->graph ele ele)
-                                                   :else ele)) sql-results)
-          nquery        [{:tmp query}]
-          ndb           {:tmp graph-results}]
-      ; Leverage db->tree to filter out the cruft we've added to accomplish the joins
-      (:tmp (om/db->tree nquery ndb {})))))
+  (try
+    (jdbc/with-db-transaction [db db]
+      (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
+            sql->graph    (set/map-invert graph->sql)
+            graph-results (clojure.walk/postwalk (fn [ele]
+                                                   (cond
+                                                     (and (keyword? ele) (= "id" (name ele))) :db/id
+                                                     (keyword? ele) (get sql->graph ele ele)
+                                                     :else ele)) sql-results)
+            nquery        [{:tmp query}]
+            ndb           {:tmp graph-results}]
+        ; Leverage db->tree to filter out the cruft we've added to accomplish the joins
+        graph-results ;sql-results
+        ; FIXME: db->tree not working with recursive queries???
+        #_(:tmp (om/db->tree nquery ndb {}))))
+    (catch Throwable t
+      (timbre/error "Graph query failed: " t)
+      (.printStackTrace t))))
 
 

@@ -23,13 +23,16 @@
                                      :person/account               :member/account_id
                                      :settings/auto-open?          :settings/auto_open
                                      :settings/keyboard-shortcuts? :settings/keyboard_shortcuts}
-                  ::core/joins      {:account/members  (core/to-many [:account/id :member/account_id])
-                                     :account/settings (core/to-one [:account/settings_id :settings/id])
-                                     :member/account   (core/to-one [:member/account_id :account/id])
-                                     :account/invoices (core/to-many [:account/id :invoice/account_id])
-                                     :invoice/account  (core/to-one [:invoice/account_id :account/id])
-                                     :invoice/items    (core/to-many [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id])
-                                     :item/invoices    (core/to-many [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id])}
+                  ::core/joins      {:account/members         (core/to-many [:account/id :member/account_id])
+                                     :account/settings        (core/to-one [:account/settings_id :settings/id])
+                                     :member/account          (core/to-one [:member/account_id :account/id])
+                                     :account/invoices        (core/to-many [:account/id :invoice/account_id])
+                                     :invoice/account         (core/to-one [:invoice/account_id :account/id])
+                                     :invoice/items           (core/to-many [:invoice/id :invoice_items/invoice_id :invoice_items/item_id :item/id])
+                                     :item/invoices           (core/to-many [:item/id :invoice_items/item_id :invoice_items/invoice_id :invoice/id])
+
+                                     :todo_list/items         (core/to-many [:todo_list/id :todo_list_item/todo_list_id])
+                                     :todo_list_item/subitems (core/to-many [:todo_list_item/id :todo_list_item/parent_item_id])}
                   ::core/pks        {}})
 (def mysql-schema
   (assoc test-schema
@@ -201,40 +204,53 @@
                 (core/seed-row :invoice_items {:id :join-row-1 :invoice_id :id/invoice-1 :item_id :id/gadget :invoice_items/quantity 2})
                 (core/seed-row :invoice_items {:id :join-row-2 :invoice_id :id/invoice-2 :item_id :id/widget :invoice_items/quantity 8})
                 (core/seed-row :invoice_items {:id :join-row-3 :invoice_id :id/invoice-2 :item_id :id/spanner :invoice_items/quantity 1})
-                (core/seed-row :invoice_items {:id :join-row-4 :invoice_id :id/invoice-2 :item_id :id/gadget :invoice_items/quantity 5})])
+                (core/seed-row :invoice_items {:id :join-row-4 :invoice_id :id/invoice-2 :item_id :id/gadget :invoice_items/quantity 5})
+
+                (core/seed-row :todo_list {:id :list-1 :name "Things to do"})
+                (core/seed-row :todo_list_item {:id :item-1 :label "A" :todo_list_id :list-1})
+                (core/seed-row :todo_list_item {:id :item-1-1 :label "A.1" :parent_item_id :item-1})
+                (core/seed-row :todo_list_item {:id :item-1-1-1 :label "A.1.1" :parent_item_id :item-1-1})
+                (core/seed-row :todo_list_item {:id :item-2 :label "B" :todo_list_id :list-1})
+                (core/seed-row :todo_list_item {:id :item-2-1 :label "B.1" :parent_item_id :item-2})
+                (core/seed-row :todo_list_item {:id :item-2-2 :label "B.2" :parent_item_id :item-2})])
 
 (specification "Integration Tests for Graph Queries (PostgreSQL)" :integration :focused
   (with-database [db test-database]
-    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db test-schema test-rows)
-          query             [:db/id :account/name {:account/invoices [:db/id
-                                                                      ;{:invoice/invoice_items [:invoice_items/quantity]}
-                                                                      {:invoice/items [:db/id :item/name]}]}]
-          expected-result   {:db/id            joe
-                             :account/name     "Joe"
-                             :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
-                                                {:db/id invoice-2 :invoice/items [{:db/id gadget :item/name "gadget"}
-                                                                                  {:db/id widget :item/name "widget"}
-                                                                                  {:db/id spanner :item/name "spanner"}]}]}
-          query-2           [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
-          expected-result-2 [{:db/id            joe
-                              :account/name     "Joe"
-                              :account/members  [{:db/id sam :person/name "Sam"}
-                                                 {:db/id sally :person/name "Sally"}]
-                              :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                             {:db/id            mary
-                              :account/name     "Mary"
-                              :account/settings {}
-                              :account/members  [{:db/id judy :person/name "Judy"}]}]
-          query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
-          expected-result-3 [{:db/id         gadget :item/name "gadget"
-                              :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
-                                              {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
-          root-set          #{joe}
-          source-table      :account]
+    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings
+                  list-1 item-1 item-1-1 item-1-1-1 item-2 item-2-1 item-2-2]} (core/seed! db test-schema test-rows)
+          query                 [:db/id :account/name {:account/invoices [:db/id
+                                                                          ;{:invoice/invoice_items [:invoice_items/quantity]}
+                                                                          {:invoice/items [:db/id :item/name]}]}]
+          expected-result       {:db/id            joe
+                                 :account/name     "Joe"
+                                 :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                    {:db/id invoice-2 :invoice/items [{:db/id gadget :item/name "gadget"}
+                                                                                      {:db/id widget :item/name "widget"}
+                                                                                      {:db/id spanner :item/name "spanner"}]}]}
+          query-2               [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
+          expected-result-2     [{:db/id            joe
+                                  :account/name     "Joe"
+                                  :account/members  [{:db/id sam :person/name "Sam"}
+                                                     {:db/id sally :person/name "Sally"}]
+                                  :account/settings {:db/id joe-settings :settings/auto-open? true}}
+                                 {:db/id            mary
+                                  :account/name     "Mary"
+                                  :account/settings {}
+                                  :account/members  [{:db/id judy :person/name "Judy"}]}]
+          query-3               [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
+          expected-result-3     [{:db/id         gadget :item/name "gadget"
+                                  :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
+                                                  {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
+          root-set              #{joe}
+          recursive-query       '[:db/id :todo_list/name {:todo_list/items [:db/id :todo_list_item/label {:todo_list_item/subitems 3}]}]
+          recursive-expectation [{}]
+          source-table          :account]
       (assertions
-        (core/run-query db test-schema :account/id query #{joe}) => [expected-result]
-        (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
-        (core/run-query db test-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
+        ;(core/run-query db test-schema :account/id query #{joe}) => [expected-result]
+        ;(core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        (core/run-query db test-schema :todo_list/id recursive-query (sorted-set list-1)) => recursive-expectation
+        ;(core/run-query db test-schema :account/id query-3 (sorted-set gadget)) => expected-result-3
+        ))))
 
 (specification "MySQL Integration Tests" :mysql
   (with-database [db mysql-database]

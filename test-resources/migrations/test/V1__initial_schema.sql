@@ -37,3 +37,16 @@ CREATE TABLE invoice_items (
   invoice_id INTEGER  NOT NULL REFERENCES invoice (id),
   item_id    INTEGER  NOT NULL REFERENCES item (id)
 );
+
+CREATE TABLE todo_list (
+  id   SERIAL PRIMARY KEY,
+  name TEXT
+);
+
+CREATE TABLE todo_list_item (
+  id             SERIAL PRIMARY KEY,
+  label          TEXT,
+  todo_list_id   INTEGER REFERENCES todo_list (id),
+  parent_item_id INTEGER REFERENCES todo_list_item (id)
+);
+
