@@ -479,63 +479,76 @@
     (= 4 (count join-sequence))))
 
 (defn- run-query*
-  [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
-  (assert (s/valid? ::schema schema) "schema is valid")
-  (when (seq root-id-set)
-    (let [is-join?                 (contains? joins join-or-id-column)
-          join-path                (get joins join-or-id-column [])
-          id-column                (if is-join? (second join-path) join-or-id-column)
-          is-to-one?               (to-one? join-path)
-          query-joins              (keep #(when (map? %) %) query)
-          sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
-          rows                     (jdbc/query db [sql])
-          get-root-set             (fn [join]
-                                     (let [join-key      (ffirst join)
-                                           join-sequence (get joins join-key [])
-                                           root-set-prop (first join-sequence)]
-                                       (if root-set-prop
-                                         (reduce (fn [s row] (conj s (get row root-set-prop))) #{} rows)
-                                         #{})))
-          join-results             (reduce
-                                     (fn [acc query-join]
-                                       ; FIXME: recursive queries need loop detection
-                                       (let [subquery        (join-query query-join)
-                                             recursive?      (or (= subquery '...) (integer? subquery))
-                                             real-query      (if recursive?
-                                                               query
-                                                               subquery)
-                                             results         (run-query* db schema (join-key query-join) real-query (get-root-set query-join))
-                                             join-sequence   (get joins (join-key query-join))
-                                             is-to-one?      (to-one? join-sequence)
-                                             fkid-col        (second join-sequence)
-                                             grouped-results (group-by fkid-col results)
-                                             grouped-results (if is-to-one?
-                                                               {(get results fkid-col) results}
-                                                               grouped-results)]
-                                         (assoc acc (join-key query-join) grouped-results)))
-                                     {}
-                                     query-joins)
-          join-row-to-join-results (fn [row]
-                                     (reduce
-                                       (fn [r [jk grouped-results]]
-                                         (let [join-path   (get joins jk)
-                                               forward-key (first join-path)
-                                               row-key     (cond
-                                                             ; FIXME: on recursion, we're picking the wrong row key
-                                                             (uses-join-table? schema jk) forward-key
-                                                             (forward? schema jk) forward-key
-                                                             (recursive? schema jk) forward-key
-                                                             :else id-column)
-                                               row-id      (get r row-key)
-                                               join-result (get grouped-results row-id)]
-                                           (if (and join-result (seq join-result))
-                                             (assoc r jk join-result)
-                                             r)))
-                                       row join-results))
-          final-results            (map join-row-to-join-results rows)]
-      (if is-to-one?
-        (first final-results)
-        (vec final-results)))))
+  ([db schema join-or-id-column query root-id-set] (run-query* db schema join-or-id-column query root-id-set {}))
+  ([db {:keys [::joins] :as schema} join-or-id-column query root-id-set recursion-tracking]
+    ; NOTE: recursion-tracking is a map: keys are the join key followed through recursion, value is the set of ids.
+    ; a loop is detected when the intersection of the new id set and the old id set is not empty
+   (assert (s/valid? ::schema schema) "schema is valid")
+   (when (seq root-id-set)
+     (let [is-join?                 (contains? joins join-or-id-column)
+           join-path                (get joins join-or-id-column [])
+           id-column                (if is-join? (second join-path) join-or-id-column)
+           is-to-one?               (to-one? join-path)
+           query-joins              (keep #(when (map? %) %) query)
+           sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
+           rows                     (jdbc/query db [sql])
+           get-root-set             (fn [join]
+                                      (let [join-key      (ffirst join)
+                                            join-sequence (get joins join-key [])
+                                            root-set-prop (first join-sequence)]
+                                        (if root-set-prop
+                                          (reduce (fn [s row]
+                                                    (if-let [id (get row root-set-prop)]
+                                                      (conj s id)
+                                                      s)) #{} rows)
+                                          #{})))
+           join-results             (reduce
+                                      (fn [acc query-join]
+                                        (let [subquery            (join-query query-join)
+                                              recursive?          (or (= subquery '...) (integer? subquery))
+                                              recursive-depth     (if (integer? subquery) subquery 1)
+                                              k                   (join-key query-join)
+                                              real-query          (if recursive?
+                                                                    (om/reduce-query-depth query k)
+                                                                    subquery)
+                                              root-set            (get-root-set query-join)
+                                              loop?               (not-empty (set/intersection (get recursion-tracking k) root-set))
+                                              updated-recur-track (if (and (not loop?) recursive?)
+                                                                    (update recursion-tracking k (fnil #(set/union % root-set) #{}))
+                                                                    recursion-tracking)
+                                              results             (if (or loop? (< recursive-depth 1))
+                                                                    nil ; this should be a {:table/id id} marker
+                                                                    (run-query* db schema k real-query root-set updated-recur-track))
+                                              join-sequence       (get joins k)
+                                              is-to-one?          (to-one? join-sequence)
+                                              fkid-col            (second join-sequence)
+                                              grouped-results     (group-by fkid-col results)
+                                              grouped-results     (if is-to-one?
+                                                                    {(get results fkid-col) results}
+                                                                    grouped-results)]
+                                          (assoc acc (join-key query-join) grouped-results)))
+                                      {}
+                                      query-joins)
+           join-row-to-join-results (fn [row]
+                                      (reduce
+                                        (fn [r [jk grouped-results]]
+                                          (let [join-path   (get joins jk)
+                                                forward-key (first join-path)
+                                                row-key     (cond
+                                                              (uses-join-table? schema jk) forward-key
+                                                              (forward? schema jk) forward-key
+                                                              (recursive? schema jk) forward-key
+                                                              :else id-column)
+                                                row-id      (get r row-key)
+                                                join-result (get grouped-results row-id)]
+                                            (if (and join-result (seq join-result))
+                                              (assoc r jk join-result)
+                                              r)))
+                                        row join-results))
+           final-results            (map join-row-to-join-results rows)]
+       (if is-to-one?
+         (first final-results)
+         (vec final-results))))))
 
 (defn strip-join-columns
   "Walk the query and graph result, removing any join columns that were part of query processing, but were not asked

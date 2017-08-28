@@ -26,6 +26,7 @@
                   ; NOTE: Om join prop, SQL column props
                   ::core/joins      {:account/members         (core/to-many [:account/id :member/account_id])
                                      :account/settings        (core/to-one [:account/settings_id :settings/id])
+                                     :account/spouse          (core/to-one [:account/spouse_id :account/id])
                                      :member/account          (core/to-one [:member/account_id :account/id])
                                      :account/invoices        (core/to-many [:account/id :invoice/account_id])
                                      :invoice/account         (core/to-one [:invoice/account_id :account/id])
@@ -195,6 +196,8 @@
 (def test-rows [(core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
                 (core/seed-row :account {:id :id/joe :name "Joe" :settings_id :id/joe-settings})
                 (core/seed-row :account {:id :id/mary :name "Mary"})
+                (core/seed-update :account :id/joe {:spouse_id :id/mary })
+                (core/seed-update :account :id/mary {:spouse_id :id/joe })
                 (core/seed-row :member {:id :id/sam :name "Sam" :account_id :id/joe})
                 (core/seed-row :member {:id :id/sally :name "Sally" :account_id :id/joe})
                 (core/seed-row :member {:id :id/judy :name "Judy" :account_id :id/mary})
@@ -220,37 +223,45 @@
   (with-database [db test-database]
     (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings
                   list-1 item-1 item-1-1 item-1-1-1 item-2 item-2-1 item-2-2]} (core/seed! db test-schema test-rows)
-          query                 [:db/id :account/name {:account/invoices [:db/id
-                                                                          ;{:invoice/invoice_items [:invoice_items/quantity]}
-                                                                          {:invoice/items [:db/id :item/name]}]}]
-          expected-result       {:db/id            joe
-                                 :account/name     "Joe"
-                                 :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
-                                                    {:db/id invoice-2 :invoice/items [{:db/id gadget :item/name "gadget"}
-                                                                                      {:db/id widget :item/name "widget"}
-                                                                                      {:db/id spanner :item/name "spanner"}]}]}
-          query-2               [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
-          expected-result-2     [{:db/id            joe
-                                  :account/name     "Joe"
-                                  :account/members  [{:db/id sam :person/name "Sam"}
-                                                     {:db/id sally :person/name "Sally"}]
-                                  :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                                 {:db/id           mary
-                                  :account/name    "Mary"
-                                  :account/members [{:db/id judy :person/name "Judy"}]}]
-          query-3               [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
-          expected-result-3     [{:db/id         gadget :item/name "gadget"
-                                  :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
-                                                  {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
-          root-set              #{joe}
-          recursive-query       '[:db/id :todo-list/name {:todo-list/items [:db/id :todo-list-item/label {:todo-list-item/subitems 3}]}]
-          recursive-expectation [{:db/id list-1 :todo-list/name "Things to do" :todo-list/items
-                                         [{:db/id                   item-1 :todo-list-item/label "A"
-                                           :todo-list-item/subitems [{:db/id                   item-1-1 :todo-list-item/label "A.1"
-                                                                      :todo-list-item/subitems [{:db/id item-1-1-1 :todo-list-item/label "A.1.1"}]}]}
-                                          {:db/id                   item-2 :todo-list-item/label "B"
-                                           :todo-list-item/subitems [{:db/id item-2-1 :todo-list-item/label "B.1"} {:db/id item-2-2 :todo-list-item/label "B.2"}]}]}]
-          source-table          :account]
+          query                       [:db/id :account/name {:account/invoices [:db/id
+                                                                                ;{:invoice/invoice_items [:invoice_items/quantity]}
+                                                                                {:invoice/items [:db/id :item/name]}]}]
+          expected-result             {:db/id            joe
+                                       :account/name     "Joe"
+                                       :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                          {:db/id invoice-2 :invoice/items [{:db/id gadget :item/name "gadget"}
+                                                                                            {:db/id widget :item/name "widget"}
+                                                                                            {:db/id spanner :item/name "spanner"}]}]}
+          query-2                     [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
+          expected-result-2           [{:db/id            joe
+                                        :account/name     "Joe"
+                                        :account/members  [{:db/id sam :person/name "Sam"}
+                                                           {:db/id sally :person/name "Sally"}]
+                                        :account/settings {:db/id joe-settings :settings/auto-open? true}}
+                                       {:db/id           mary
+                                        :account/name    "Mary"
+                                        :account/members [{:db/id judy :person/name "Judy"}]}]
+          query-3                     [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
+          expected-result-3           [{:db/id         gadget :item/name "gadget"
+                                        :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
+                                                        {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
+          root-set                    #{joe}
+          recursive-query             '[:db/id :todo-list/name {:todo-list/items [:db/id :todo-list-item/label {:todo-list-item/subitems ...}]}]
+          recursive-query-depth       '[:db/id :todo-list/name {:todo-list/items [:db/id :todo-list-item/label {:todo-list-item/subitems 1}]}]
+          recursive-query-loop        '[:db/id :account/name {:account/spouse ...}]
+          recursive-expectation       [{:db/id list-1 :todo-list/name "Things to do" :todo-list/items
+                                               [{:db/id                   item-1 :todo-list-item/label "A"
+                                                 :todo-list-item/subitems [{:db/id                   item-1-1 :todo-list-item/label "A.1"
+                                                                            :todo-list-item/subitems [{:db/id item-1-1-1 :todo-list-item/label "A.1.1"}]}]}
+                                                {:db/id                   item-2 :todo-list-item/label "B"
+                                                 :todo-list-item/subitems [{:db/id item-2-1 :todo-list-item/label "B.1"} {:db/id item-2-2 :todo-list-item/label "B.2"}]}]}]
+          recursive-expectation-depth [{:db/id list-1 :todo-list/name "Things to do" :todo-list/items
+                                               [{:db/id                   item-1 :todo-list-item/label "A"
+                                                 :todo-list-item/subitems [{:db/id item-1-1 :todo-list-item/label "A.1"}]}
+                                                {:db/id                   item-2 :todo-list-item/label "B"
+                                                 :todo-list-item/subitems [{:db/id item-2-1 :todo-list-item/label "B.1"} {:db/id item-2-2 :todo-list-item/label "B.2"}]}]}]
+          recursive-expectation-loop  []
+          source-table                :account]
       (assertions
         "to-many"
         (core/run-query db test-schema :account/id query #{joe}) => [expected-result]
@@ -258,6 +269,10 @@
         (core/run-query db test-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
         "recursion"
         (core/run-query db test-schema :todo-list/id recursive-query (sorted-set list-1)) => recursive-expectation
+        "recursion with depth limit"
+        (core/run-query db test-schema :todo-list/id recursive-query-depth (sorted-set list-1)) => recursive-expectation-depth
+        "recursive loop detection"
+        (core/run-query db test-schema :account/id recursive-query-loop (sorted-set joe)) => recursive-expectation-loop
         "reverse many-to-many"
         (core/run-query db test-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
 
