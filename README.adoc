@@ -184,8 +184,6 @@ To-many is implied by default, but you can make it explicit with a call to `(cor
 
 ==== Support for many-to-many:
 
-WARNING: Support for join tables is in progress. THIS DOES NOT WORK YET.
-
 Many-to-many joins are described with four table/column keywords in the join sequence. For example,
 say you had the schema:
 
