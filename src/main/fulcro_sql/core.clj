@@ -31,38 +31,38 @@
                   :req [::pks ::graph->sql ::joins]
                   :opt [::driver]))
 
-(defmulti sqlize* (fn sqlize-dispatch [schema kw] (get schema :driver :default)))
+(defmulti graphprop->sqlprop* (fn sqlize-dispatch [schema kw] (get schema :driver :default)))
 
-(defmethod sqlize* :default [schema kw]
+(defmethod graphprop->sqlprop* :default [schema kw]
   (let [nspc (some-> kw namespace (str/replace "-" "_"))
         nm   (some-> kw name (str/replace "-" "_"))]
     (if nspc
       (keyword nspc nm)
       (keyword nm))))
 
-(defn sqlize
+(defn graphprop->sqlprop
   "Convert a keyword in clojure-form to sql-form. E.g. :account-id to :account_id"
   [schema kw]
-  (sqlize* schema kw))
+  (graphprop->sqlprop* schema kw))
 
-(defmulti omize* (fn omize-dispatch [schema kw] (get schema :driver :default)))
+(defmulti sqlprop->graphprop* (fn omize-dispatch [schema kw] (get schema :driver :default)))
 
-(defmethod omize* :default [schema kw]
+(defmethod sqlprop->graphprop* :default [schema kw]
   (let [nspc (some-> kw namespace (str/replace "_" "-"))
         nm   (some-> kw name (str/replace "_" "-"))]
     (if nspc
       (keyword nspc nm)
       (keyword nm))))
 
-(defn omize
+(defn sqlprop->graphprop
   "Convert a keyword in clojure-form to sql-form. E.g. :account-id to :account_id"
   [schema kw]
-  (omize* schema kw))
+  (sqlprop->graphprop* schema kw))
 
 (defn omprop->sqlprop
   "Derive an sqlprop from an om query element (prop or join)"
   [{:keys [::graph->sql] :as schema} p]
-  (sqlize schema
+  (graphprop->sqlprop schema
     (if (map? p)
       (get graph->sql (ffirst p) (ffirst p))
       (get graph->sql p p))))
@@ -82,7 +82,7 @@
                             table-kw (conj s table-kw)
                             :else s)))) #{} query)]
     (assert (= 1 (count nses)) (str "Could not determine a single table from the subquery " query))
-    (sqlize schema (first nses))))
+    (graphprop->sqlprop schema (first nses))))
 
 (defn table-for
   "Scans the given Om query and tries to determine which table is to be used for the props within it."
@@ -580,7 +580,7 @@
             graph-results (clojure.walk/postwalk (fn [ele]
                                                    (cond
                                                      (and (keyword? ele) (= "id" (name ele))) :db/id
-                                                     (keyword? ele) (omize schema (get sql->graph ele ele))
+                                                     (keyword? ele) (sqlprop->graphprop schema (get sql->graph ele ele))
                                                      :else ele)) sql-results)]
         (strip-join-columns query graph-results)))
     (catch Throwable t
