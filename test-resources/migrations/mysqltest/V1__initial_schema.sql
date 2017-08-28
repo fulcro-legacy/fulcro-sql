@@ -9,7 +9,8 @@ CREATE TABLE account (
   name           TEXT,
   last_edited_by INTEGER,
   settings_id    INTEGER REFERENCES settings (id),
-  created_on     TIMESTAMP
+  created_on     TIMESTAMP,
+  spouse_id      INTEGER REFERENCES account (id)
 );
 
 CREATE TABLE member (

@@ -196,8 +196,8 @@
 (def test-rows [(core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
                 (core/seed-row :account {:id :id/joe :name "Joe" :settings_id :id/joe-settings})
                 (core/seed-row :account {:id :id/mary :name "Mary"})
-                (core/seed-update :account :id/joe {:spouse_id :id/mary })
-                (core/seed-update :account :id/mary {:spouse_id :id/joe })
+                (core/seed-update :account :id/joe {:spouse_id :id/mary})
+                (core/seed-update :account :id/mary {:spouse_id :id/joe})
                 (core/seed-row :member {:id :id/sam :name "Sam" :account_id :id/joe})
                 (core/seed-row :member {:id :id/sally :name "Sally" :account_id :id/joe})
                 (core/seed-row :member {:id :id/judy :name "Judy" :account_id :id/mary})
@@ -260,7 +260,9 @@
                                                  :todo-list-item/subitems [{:db/id item-1-1 :todo-list-item/label "A.1"}]}
                                                 {:db/id                   item-2 :todo-list-item/label "B"
                                                  :todo-list-item/subitems [{:db/id item-2-1 :todo-list-item/label "B.1"} {:db/id item-2-2 :todo-list-item/label "B.2"}]}]}]
-          recursive-expectation-loop  []
+          recursive-expectation-loop  [{:db/id          joe :account/name "Joe"
+                                        :account/spouse {:db/id          mary :account/name "Mary"
+                                                         :account/spouse {:db/id joe :account/name "Joe"}}}]
           source-table                :account]
       (assertions
         "to-many"
@@ -297,7 +299,6 @@
                               :account/settings {:db/id joe-settings :settings/auto-open? true}}
                              {:db/id            mary
                               :account/name     "Mary"
-                              :account/settings {}
                               :account/members  [{:db/id judy :person/name "Judy"}]}]
           query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3 [{:db/id         gadget :item/name "gadget"
@@ -315,7 +316,7 @@
         "many-to-many (forward)"
         (fix-nums (core/run-query db mysql-schema :account/id query #{joe})) => (fix-nums [expected-result])
         "one-to-many query (forward)"
-        (core/run-query db mysql-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        (fix-nums (core/run-query db mysql-schema :account/id query-2 (sorted-set joe mary))) => (fix-nums expected-result-2)
         "many-to-many (reverse)"
         (core/run-query db mysql-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
 
