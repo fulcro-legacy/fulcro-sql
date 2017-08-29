@@ -28,4 +28,5 @@
                  [fulcrologic/fulcro-spec "1.0.0-beta8" :scope "test" :exclusions [org.clojure/tools.reader]]
                  [clj-time "0.14.0" :scope "test"]
                  [org.mariadb.jdbc/mariadb-java-client "2.1.0" :scope "test"]
-                 [org.postgresql/postgresql "42.1.4.jre7" :scope "test"]])
+                 [org.postgresql/postgresql "42.1.4.jre7" :scope "test"]
+                 [com.h2database/h2 "1.4.196" :scope "test"]])

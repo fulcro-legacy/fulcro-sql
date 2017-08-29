@@ -7,5 +7,5 @@
   {:config       {:port 8888}
    :test-paths   ["src/test"]
    :source-paths ["src/main"]}
-  {:available #{:focused :integration :mysql}
+  {:available #{:focused :integration :mysql :h2}
    :default   #{::sel/none :focused}})

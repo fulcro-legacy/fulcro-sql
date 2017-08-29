@@ -154,6 +154,10 @@
   (jdbc/execute! db ["DROP SCHEMA PUBLIC CASCADE"])
   (jdbc/execute! db ["CREATE SCHEMA PUBLIC"]))
 
+(defmethod create-drop* :h2 [db dbkey dbconfig]
+  (timbre/info "Create-drop was set. Cleaning everything out of the database " dbkey " (PostgreSQL).")
+  (jdbc/execute! db ["DROP ALL OBJECTS"]))
+
 (defmethod create-drop* :mysql [db dbkey dbconfig]
   (let [name (get dbconfig :database-name (name dbkey))]
     (timbre/info "Create-drop was set. Cleaning everything out of the database " name " (MySQL).")

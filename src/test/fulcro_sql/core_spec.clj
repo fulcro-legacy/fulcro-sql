@@ -19,6 +19,11 @@
                      :database-name   "test"
                      :migrations      ["classpath:migrations/mysqltest"]})
 
+(def h2-database {:hikaricp-config "h2test.properties"
+                  :driver          :h2
+                  :database-name   "test"
+                  :migrations      ["classpath:migrations/h2test"]})
+
 (def test-schema {::core/graph->sql {:person/name                  :member/name
                                      :person/account               :member/account_id
                                      :settings/auto-open?          :settings/auto_open
@@ -41,6 +46,9 @@
   (assoc test-schema
     :driver :mysql
     :database-name "test"))                                 ; needed for create/drop in mysql...there is no drop schema
+
+(def h2-schema
+  (assoc test-schema :driver :h2))
 
 (specification "Database Component" :integration
   (behavior "Can create a functional database pool from HikariCP properties and Flyway migrations."
@@ -225,7 +233,7 @@
                 (core/seed-row :todo_list_item {:id :item-2-1 :label "B.1" :parent_item_id :item-2})
                 (core/seed-row :todo_list_item {:id :item-2-2 :label "B.2" :parent_item_id :item-2})])
 
-(specification "Integration Tests for Graph Queries (PostgreSQL)" :integration :focused
+(specification "Integration Tests for Graph Queries (PostgreSQL)" :integration
   (with-database [db test-database]
     (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings
                   list-1 item-1 item-1-1 item-1-1-1 item-2 item-2-1 item-2-2]} (core/seed! db test-schema test-rows)
@@ -303,9 +311,9 @@
                               :account/members  [{:db/id sam :person/name "Sam"}
                                                  {:db/id sally :person/name "Sally"}]
                               :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                             {:db/id            mary
-                              :account/name     "Mary"
-                              :account/members  [{:db/id judy :person/name "Judy"}]}]
+                             {:db/id           mary
+                              :account/name    "Mary"
+                              :account/members [{:db/id judy :person/name "Judy"}]}]
           query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3 [{:db/id         gadget :item/name "gadget"
                               :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
@@ -325,6 +333,49 @@
         (fix-nums (core/run-query db mysql-schema :account/id query-2 (sorted-set joe mary))) => (fix-nums expected-result-2)
         "many-to-many (reverse)"
         (core/run-query db mysql-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
+
+(specification "H2 Integration Tests" :h2
+  (with-database [db h2-database]
+    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db h2-schema test-rows)
+          query             [:db/id :account/name {:account/invoices [:db/id
+                                                                      ; TODO: data on join table
+                                                                      ;{:invoice/invoice_items [:invoice_items/quantity]}
+                                                                      {:invoice/items [:db/id :item/name]}]}]
+          expected-result   {:db/id            joe
+                             :account/name     "Joe"
+                             :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                {:db/id invoice-2 :invoice/items [{:db/id widget :item/name "widget"}
+                                                                                  {:db/id spanner :item/name "spanner"}
+                                                                                  {:db/id gadget :item/name "gadget"}]}]}
+          query-2           [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
+          expected-result-2 [{:db/id            joe
+                              :account/name     "Joe"
+                              :account/members  [{:db/id sam :person/name "Sam"}
+                                                 {:db/id sally :person/name "Sally"}]
+                              :account/settings {:db/id joe-settings :settings/auto-open? true}}
+                             {:db/id           mary
+                              :account/name    "Mary"
+                              :account/members [{:db/id judy :person/name "Judy"}]}]
+          query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
+          expected-result-3 [{:db/id         gadget :item/name "gadget"
+                              :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
+                                              {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
+          root-set          #{joe}
+          source-table      :account
+          fix-nums          (fn [result]
+                              (clojure.walk/postwalk
+                                (fn [ele]
+                                  (if (= java.math.BigInteger (type ele))
+                                    (long ele)
+                                    ele)) result))]
+      (assertions
+        "many-to-many (forward)"
+        (core/run-query db h2-schema :account/id query #{joe}) => [expected-result]
+        "one-to-many query (forward)"
+        (core/run-query db h2-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
+        "many-to-many (reverse)"
+        (core/run-query db h2-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
+
 
 (comment
   (do
