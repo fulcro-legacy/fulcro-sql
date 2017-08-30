@@ -1,3 +1,11 @@
+0.1.0
+-----
+- Support for MySQL/MariaDB, and H2
+- Fixed a number of issues with graph traversal
+- Added support for recursive queries and loop detection
+- Renamed a few things. See the new specs and updated readme.
+- Most join types supported
+
 0.0.1
 -----
 - Support for databases as com.stuartsierra components
