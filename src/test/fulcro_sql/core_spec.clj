@@ -203,8 +203,9 @@
 
 (def test-rows [; basic to-one and to-many
                 (core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
+                (core/seed-row :settings {:id :id/mary-settings :auto_open false :keyboard_shortcuts true})
                 (core/seed-row :account {:id :id/joe :name "Joe" :settings_id :id/joe-settings})
-                (core/seed-row :account {:id :id/mary :name "Mary"})
+                (core/seed-row :account {:id :id/mary :name "Mary" :settings_id :id/mary-settings})
                 (core/seed-row :member {:id :id/sam :name "Sam" :account_id :id/joe})
                 (core/seed-row :member {:id :id/sally :name "Sally" :account_id :id/joe})
                 (core/seed-row :member {:id :id/judy :name "Judy" :account_id :id/mary})
@@ -236,7 +237,7 @@
 (specification "Integration Tests for Graph Queries (PostgreSQL)" :integration
   (with-database [db test-database]
     (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings
-                  list-1 item-1 item-1-1 item-1-1-1 item-2 item-2-1 item-2-2]} (core/seed! db test-schema test-rows)
+                  id/mary-settings list-1 item-1 item-1-1 item-1-1-1 item-2 item-2-1 item-2-2]} (core/seed! db test-schema test-rows)
           query                       [:db/id :account/name {:account/invoices [:db/id
                                                                                 ;{:invoice/invoice_items [:invoice_items/quantity]}
                                                                                 {:invoice/items [:db/id :item/name]}]}]
@@ -252,9 +253,10 @@
                                         :account/members  [{:db/id sam :person/name "Sam"}
                                                            {:db/id sally :person/name "Sally"}]
                                         :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                                       {:db/id           mary
-                                        :account/name    "Mary"
-                                        :account/members [{:db/id judy :person/name "Judy"}]}]
+                                       {:db/id            mary
+                                        :account/name     "Mary"
+                                        :account/settings {:db/id mary-settings :settings/auto-open? false}
+                                        :account/members  [{:db/id judy :person/name "Judy"}]}]
           query-3                     [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3           [{:db/id         gadget :item/name "gadget"
                                         :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
@@ -294,7 +296,8 @@
 
 (specification "MySQL Integration Tests" :mysql
   (with-database [db mysql-database]
-    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db mysql-schema test-rows)
+    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy
+                  id/joe-settings id/mary-settings]} (core/seed! db mysql-schema test-rows)
           query             [:db/id :account/name {:account/invoices [:db/id
                                                                       ; TODO: data on join table
                                                                       ;{:invoice/invoice_items [:invoice_items/quantity]}
@@ -313,6 +316,7 @@
                               :account/settings {:db/id joe-settings :settings/auto-open? true}}
                              {:db/id           mary
                               :account/name    "Mary"
+                              :account/settings {:db/id mary-settings :settings/auto-open? false}
                               :account/members [{:db/id judy :person/name "Judy"}]}]
           query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3 [{:db/id         gadget :item/name "gadget"
@@ -336,7 +340,8 @@
 
 (specification "H2 Integration Tests" :h2
   (with-database [db h2-database]
-    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam id/sally id/judy id/joe-settings]} (core/seed! db h2-schema test-rows)
+    (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam
+                  id/sally id/judy id/joe-settings id/mary-settings]} (core/seed! db h2-schema test-rows)
           query             [:db/id :account/name {:account/invoices [:db/id
                                                                       ; TODO: data on join table
                                                                       ;{:invoice/invoice_items [:invoice_items/quantity]}
@@ -355,6 +360,7 @@
                               :account/settings {:db/id joe-settings :settings/auto-open? true}}
                              {:db/id           mary
                               :account/name    "Mary"
+                              :account/settings {:db/id mary-settings :settings/auto-open? false}
                               :account/members [{:db/id judy :person/name "Judy"}]}]
           query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3 [{:db/id         gadget :item/name "gadget"

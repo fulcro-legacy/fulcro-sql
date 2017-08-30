@@ -169,8 +169,6 @@
 (defrecord DatabaseManager [config connection-pools]
   component/Lifecycle
   (start [this]
-    (timbre/debug "Ensuring PostgreSQL JDBC driver is loaded.")
-    (Class/forName "org.postgresql.Driver")
     (let [databases (-> config :value :sqldbm)
           valid?    (s/valid? ::sqldbm databases)
           pools     (and valid?
@@ -492,7 +490,6 @@
      (let [is-join?                 (contains? joins join-or-id-column)
            join-path                (get joins join-or-id-column [])
            id-column                (if is-join? (second join-path) join-or-id-column)
-           is-to-one?               (to-one? join-path)
            query-joins              (keep #(when (map? %) %) query)
            sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
            rows                     (jdbc/query db [sql])
@@ -524,10 +521,9 @@
                                                                     nil ; this should be a {:table/id id} marker
                                                                     (run-query* db schema k real-query root-set updated-recur-track))
                                               join-sequence       (get joins k)
-                                              is-to-one?          (to-one? join-sequence)
                                               fkid-col            (second join-sequence)
                                               grouped-results     (group-by fkid-col results)
-                                              grouped-results     (if is-to-one?
+                                              grouped-results     (if (map? results)
                                                                     {(get results fkid-col) results}
                                                                     grouped-results)]
                                           (assoc acc (join-key query-join) grouped-results)))
@@ -544,15 +540,16 @@
                                                               (recursive? schema jk) forward-key
                                                               :else id-column)
                                                 row-id      (get r row-key)
-                                                join-result (get grouped-results row-id)]
-                                            (if (and join-result (seq join-result))
+                                                join-result (get grouped-results row-id)
+                                                join-result (if (to-one? join-path)
+                                                              (first join-result)
+                                                              join-result)]
+                                            (if join-result
                                               (assoc r jk join-result)
                                               r)))
                                         row join-results))
            final-results            (map join-row-to-join-results rows)]
-       (if is-to-one?
-         (first final-results)
-         (vec final-results))))))
+       (vec final-results)))))
 
 (defn strip-join-columns
   "Walk the query and graph result, removing any join columns that were part of query processing, but were not asked
