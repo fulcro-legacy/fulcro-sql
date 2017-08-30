@@ -9,7 +9,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.set :as set]
-            [om.next :as om])
+            [om.next :as om]
+            [om.util :as util])
   (:import (org.flywaydb.core Flyway)
            (com.zaxxer.hikari HikariConfig HikariDataSource)
            (java.util Properties)
@@ -30,24 +31,38 @@
                   :req [::pks ::graph->sql ::joins]
                   :opt [::driver]))
 
-(defmulti sqlize* (fn sqlize-dispatch [schema kw] (get schema :driver :default)))
+(defmulti graphprop->sqlprop* (fn sqlize-dispatch [schema kw] (get schema :driver :default)))
 
-(defmethod sqlize* :default [schema kw]
+(defmethod graphprop->sqlprop* :default [schema kw]
   (let [nspc (some-> kw namespace (str/replace "-" "_"))
         nm   (some-> kw name (str/replace "-" "_"))]
     (if nspc
       (keyword nspc nm)
       (keyword nm))))
 
-(defn sqlize
+(defn graphprop->sqlprop
   "Convert a keyword in clojure-form to sql-form. E.g. :account-id to :account_id"
   [schema kw]
-  (sqlize* schema kw))
+  (graphprop->sqlprop* schema kw))
+
+(defmulti sqlprop->graphprop* (fn omize-dispatch [schema kw] (get schema :driver :default)))
+
+(defmethod sqlprop->graphprop* :default [schema kw]
+  (let [nspc (some-> kw namespace (str/replace "_" "-"))
+        nm   (some-> kw name (str/replace "_" "-"))]
+    (if nspc
+      (keyword nspc nm)
+      (keyword nm))))
+
+(defn sqlprop->graphprop
+  "Convert a keyword in clojure-form to sql-form. E.g. :account-id to :account_id"
+  [schema kw]
+  (sqlprop->graphprop* schema kw))
 
 (defn omprop->sqlprop
   "Derive an sqlprop from an om query element (prop or join)"
   [{:keys [::graph->sql] :as schema} p]
-  (sqlize schema
+  (graphprop->sqlprop schema
     (if (map? p)
       (get graph->sql (ffirst p) (ffirst p))
       (get graph->sql p p))))
@@ -67,7 +82,7 @@
                             table-kw (conj s table-kw)
                             :else s)))) #{} query)]
     (assert (= 1 (count nses)) (str "Could not determine a single table from the subquery " query))
-    (sqlize schema (first nses))))
+    (graphprop->sqlprop schema (first nses))))
 
 (defn table-for
   "Scans the given Om query and tries to determine which table is to be used for the props within it."
@@ -139,6 +154,10 @@
   (jdbc/execute! db ["DROP SCHEMA PUBLIC CASCADE"])
   (jdbc/execute! db ["CREATE SCHEMA PUBLIC"]))
 
+(defmethod create-drop* :h2 [db dbkey dbconfig]
+  (timbre/info "Create-drop was set. Cleaning everything out of the database " dbkey " (PostgreSQL).")
+  (jdbc/execute! db ["DROP ALL OBJECTS"]))
+
 (defmethod create-drop* :mysql [db dbkey dbconfig]
   (let [name (get dbconfig :database-name (name dbkey))]
     (timbre/info "Create-drop was set. Cleaning everything out of the database " name " (MySQL).")
@@ -150,8 +169,6 @@
 (defrecord DatabaseManager [config connection-pools]
   component/Lifecycle
   (start [this]
-    (timbre/debug "Ensuring PostgreSQL JDBC driver is loaded.")
-    (Class/forName "org.postgresql.Driver")
     (let [databases (-> config :value :sqldbm)
           valid?    (s/valid? ::sqldbm databases)
           pools     (and valid?
@@ -330,7 +347,7 @@
   (let [omprop                 (if (map? element) (ffirst element) element)
         id-columns             (id-columns schema)
         sql-prop               (omprop->sqlprop schema omprop)
-        join                   (get joins sql-prop)
+        join                   (get joins omprop)
         join-source-is-row-id? (some->> join first (contains? id-columns) boolean)
         join-col               (first join)
         join-prop              (when join-col (omprop->sqlprop schema join-col))]
@@ -427,6 +444,16 @@
   [join]
   (or (= :to-many (some-> join meta :arity)) (not (to-one? join))))
 
+(defn recursive?
+  "Is this a self-reference join?"
+  [{:keys [::joins] :as schema} graph-key-or-join]
+  (let [graph-join-prop (if (map? graph-key-or-join) (join-key graph-key-or-join)
+                                                     graph-key-or-join)
+        join-sequence   (get joins graph-join-prop)
+        source-table    (keyword (namespace (first join-sequence)))
+        target-table    (keyword (namespace (second join-sequence)))]
+    (= source-table target-table)))
+
 (defn reverse?
   "Opposite of forward?"
   [{:keys [::joins] :as schema} graph-key-or-join]
@@ -454,55 +481,96 @@
     (= 4 (count join-sequence))))
 
 (defn- run-query*
-  [db {:keys [::joins] :as schema} join-or-id-column query root-id-set]
-  (assert (s/valid? ::schema schema) "schema is valid")
-  (let [is-join?                 (contains? joins join-or-id-column)
-        join-path                (get joins join-or-id-column [])
-        id-column                (if is-join? (second join-path) join-or-id-column)
-        is-to-one?               (to-one? join-path)
-        query-joins              (keep #(when (map? %) %) query)
-        sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
-        rows                     (jdbc/query db [sql])
-        get-root-set             (fn [join]
-                                   (let [join-key      (ffirst join)
-                                         join-sequence (get joins join-key [])
-                                         root-set-prop (first join-sequence)]
-                                     (if root-set-prop
-                                       (reduce (fn [s row] (conj s (get row root-set-prop))) #{} rows)
-                                       #{})))
-        join-results             (reduce
-                                   (fn [acc query-join]
-                                     (let [results         (run-query* db schema (join-key query-join) (join-query query-join) (get-root-set query-join))
-                                           join-sequence   (get joins (join-key query-join))
-                                           is-to-one?      (to-one? join-sequence)
-                                           fkid-col        (second join-sequence)
-                                           grouped-results (group-by fkid-col results)
-                                           grouped-results (if is-to-one?
-                                                             {(get results fkid-col) results}
-                                                             grouped-results)]
-                                       (assoc acc (join-key query-join) grouped-results)))
-                                   {}
-                                   query-joins)
-        join-row-to-join-results (fn [row]
-                                   (reduce
-                                     (fn [r [jk grouped-results]]
-                                       ; FIXME: id-column is right for reverse FK, but not for forward FK or many-to-many
-                                       (let [join-path   (get joins jk)
-                                             forward-key (first join-path)
-                                             row-key     (cond
-                                                           (uses-join-table? schema jk) forward-key
-                                                           (forward? schema jk) forward-key
-                                                           :else id-column)
-                                             row-id      (get r row-key)
-                                             join-result (get grouped-results row-id)]
-                                         (if (and join-result (seq join-result))
-                                           (assoc r jk join-result)
-                                           r)))
-                                     row join-results))
-        final-results            (map join-row-to-join-results rows)]
-    (if is-to-one?
-      (first final-results)
-      (vec final-results))))
+  ([db schema join-or-id-column query root-id-set] (run-query* db schema join-or-id-column query root-id-set {}))
+  ([db {:keys [::joins] :as schema} join-or-id-column query root-id-set recursion-tracking]
+    ; NOTE: recursion-tracking is a map: keys are the join key followed through recursion, value is the set of ids.
+    ; a loop is detected when the intersection of the new id set and the old id set is not empty
+   (assert (s/valid? ::schema schema) "schema is valid")
+   (when (seq root-id-set)
+     (let [is-join?                 (contains? joins join-or-id-column)
+           join-path                (get joins join-or-id-column [])
+           id-column                (if is-join? (second join-path) join-or-id-column)
+           query-joins              (keep #(when (map? %) %) query)
+           sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
+           rows                     (jdbc/query db [sql])
+           get-root-set             (fn [join]
+                                      (let [join-key      (ffirst join)
+                                            join-sequence (get joins join-key [])
+                                            root-set-prop (first join-sequence)]
+                                        (if root-set-prop
+                                          (reduce (fn [s row]
+                                                    (if-let [id (get row root-set-prop)]
+                                                      (conj s id)
+                                                      s)) #{} rows)
+                                          #{})))
+           join-results             (reduce
+                                      (fn [acc query-join]
+                                        (let [subquery            (join-query query-join)
+                                              recursive?          (or (= subquery '...) (integer? subquery))
+                                              recursive-depth     (if (integer? subquery) subquery 1)
+                                              k                   (join-key query-join)
+                                              real-query          (if recursive?
+                                                                    (om/reduce-query-depth query k)
+                                                                    subquery)
+                                              root-set            (get-root-set query-join)
+                                              loop?               (not-empty (set/intersection (get recursion-tracking k) root-set))
+                                              updated-recur-track (if (and (not loop?) recursive?)
+                                                                    (update recursion-tracking k (fnil #(set/union % root-set) #{}))
+                                                                    recursion-tracking)
+                                              results             (if (or loop? (< recursive-depth 1))
+                                                                    nil ; this should be a {:table/id id} marker
+                                                                    (run-query* db schema k real-query root-set updated-recur-track))
+                                              join-sequence       (get joins k)
+                                              fkid-col            (second join-sequence)
+                                              grouped-results     (group-by fkid-col results)
+                                              grouped-results     (if (map? results)
+                                                                    {(get results fkid-col) results}
+                                                                    grouped-results)]
+                                          (assoc acc (join-key query-join) grouped-results)))
+                                      {}
+                                      query-joins)
+           join-row-to-join-results (fn [row]
+                                      (reduce
+                                        (fn [r [jk grouped-results]]
+                                          (let [join-path   (get joins jk)
+                                                forward-key (first join-path)
+                                                row-key     (cond
+                                                              (uses-join-table? schema jk) forward-key
+                                                              (forward? schema jk) forward-key
+                                                              (recursive? schema jk) forward-key
+                                                              :else id-column)
+                                                row-id      (get r row-key)
+                                                join-result (get grouped-results row-id)
+                                                join-result (if (to-one? join-path)
+                                                              (first join-result)
+                                                              join-result)]
+                                            (if join-result
+                                              (assoc r jk join-result)
+                                              r)))
+                                        row join-results))
+           final-results            (map join-row-to-join-results rows)]
+       (vec final-results)))))
+
+(defn strip-join-columns
+  "Walk the query and graph result, removing any join columns that were part of query processing, but were not asked
+  for in the original query."
+  [query graph-result]
+  (if (vector? graph-result)
+    (mapv #(strip-join-columns query %) graph-result)
+    (let [legal-keys   (keep (fn [ele] (if (map? ele) (ffirst ele) ele)) query)
+          this-result  (select-keys graph-result legal-keys)
+          final-result (reduce (fn [r query-ele]
+                                 (let [is-join?   (map? query-ele)
+                                       key        (if is-join? (join-key query-ele) query-ele)
+                                       subquery   (and is-join? (join-query query-ele))
+                                       subquery   (if (util/recursion? subquery) query subquery)
+                                       join-value (get r key)
+                                       to-many?   (and is-join? (vector? join-value))]
+                                   (cond
+                                     (and to-many? join-value) (assoc r key (mapv (fn [v] (strip-join-columns subquery v)) join-value))
+                                     (and is-join? join-value) (assoc r key (strip-join-columns subquery join-value))
+                                     :else r))) this-result query)]
+      final-result)))
 
 (defn run-query
   "Run a graph query against an SQL database.
@@ -519,17 +587,18 @@
   - Otherwise returns a vector of maps, one entry for each ID in root-id-set
   "
   [db {:keys [::joins ::graph->sql] :as schema} join-or-id-column query root-id-set]
-  (jdbc/with-db-transaction [db db]
-    (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
-          sql->graph    (set/map-invert graph->sql)
-          graph-results (clojure.walk/postwalk (fn [ele]
-                                                 (cond
-                                                   (and (keyword? ele) (= "id" (name ele))) :db/id
-                                                   (keyword? ele) (get sql->graph ele ele)
-                                                   :else ele)) sql-results)
-          nquery        [{:tmp query}]
-          ndb           {:tmp graph-results}]
-      ; Leverage db->tree to filter out the cruft we've added to accomplish the joins
-      (:tmp (om/db->tree nquery ndb {})))))
+  (try
+    (jdbc/with-db-transaction [db db]
+      (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
+            sql->graph    (set/map-invert graph->sql)
+            graph-results (clojure.walk/postwalk (fn [ele]
+                                                   (cond
+                                                     (and (keyword? ele) (= "id" (name ele))) :db/id
+                                                     (keyword? ele) (sqlprop->graphprop schema (get sql->graph ele ele))
+                                                     :else ele)) sql-results)]
+        (strip-join-columns query graph-results)))
+    (catch Throwable t
+      (timbre/error "Graph query failed: " t)
+      (.printStackTrace t))))
 
 

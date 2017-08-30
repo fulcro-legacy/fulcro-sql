@@ -9,7 +9,8 @@ CREATE TABLE account (
   name           TEXT,
   last_edited_by INTEGER,
   settings_id    INTEGER REFERENCES settings (id),
-  created_on     TIMESTAMP NOT NULL DEFAULT now()
+  created_on     TIMESTAMP NOT NULL DEFAULT now(),
+  spouse_id      INTEGER REFERENCES account (id)
 );
 
 CREATE TABLE member (
@@ -37,3 +38,16 @@ CREATE TABLE invoice_items (
   invoice_id INTEGER  NOT NULL REFERENCES invoice (id),
   item_id    INTEGER  NOT NULL REFERENCES item (id)
 );
+
+CREATE TABLE todo_list (
+  id   SERIAL PRIMARY KEY,
+  name TEXT
+);
+
+CREATE TABLE todo_list_item (
+  id             SERIAL PRIMARY KEY,
+  label          TEXT,
+  todo_list_id   INTEGER REFERENCES todo_list (id),
+  parent_item_id INTEGER REFERENCES todo_list_item (id)
+);
+
