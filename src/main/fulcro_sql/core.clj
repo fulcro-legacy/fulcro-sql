@@ -387,33 +387,83 @@
         join-description (get joins jk)]
     (first join-description)))
 
-(defn- filtering-expression [schema column instruction]
-  (assert (map? instruction) "Filtering instruction is a map of the form {:op val}")
-  (let [table-name (name (table-for schema [column]))
-        sql-name   (name (query-element->sqlprop schema column))
-        [op val] (first instruction)
-        op         (case op
-                     :eq "="
-                     :gt ">"
-                     :lt "<"
-                     :ne "<>")]
-    [(str table-name "." sql-name " " op " ?") val]))
+(s/def ::op string?)
+(s/def ::params vector?)
+(s/def ::min-depth integer?)
+(s/def ::max-depth integer?)
+(s/def ::instruction (s/keys :req [::op ::params ::min-depth ::max-depth]))
+
+(defn- filtering-expression
+  "Returns a clause and parameter for a given instruction."
+  [schema instruction]
+  (assert (s/valid? ::instruction instruction) "Filtering instruction is valid.")
+  (let [{:keys [::op ::params]} instruction]
+    [op params]))
 
 (defn- row-filter
   "Generate a row filter based on the filtering configuration and a set of table names (strings)"
   [schema filtering table-set]
-  (let [is-on-table? (fn is-on-table? [p]
-                       (contains? table-set (some->> p vector (table-for schema) name)))
-        filter-cols  (filter is-on-table? (keys filtering))
+  (let [instructions (mapcat #(get filtering %) table-set)
         [clauses params] (reduce
-                           (fn filter-step [[clause params] col]
-                             (let [instruction (get filtering col)
-                                   [subclause param] (filtering-expression schema col instruction)]
-                               [(conj clause subclause) (conj params param)]))
-                           [[] []] filter-cols)]
+                           (fn filter-step [[clause clause-params] {:keys [::op ::params ::min-depth ::max-depth] :as instruction}]
+                             (assert (s/valid? ::instruction instruction) (str instruction "is valid"))
+                             [(conj clause op) (concat clause-params params)])
+                           [[] []] instructions)]
     (if (seq clauses)
       [(str/join " AND " clauses) params]
       [nil nil])))
+
+(defn filter-where
+  "Creates a filter usable on the graph:
+
+  expr - An SQL boolean expression usable within a WHERE clause
+  params - A vector of values to plug into any ? of expr
+  min-depth - The starting depth at which this expression applies. Defaults to 1 (top level)
+  max-depth - The ending depth (inclusive) at which this expression applies. Must be >= min depth"
+  ([expr params] (filter-where expr params 1 1000))
+  ([expr params min-depth max-depth]
+   (assert (vector? params) "filter params is a vector")
+   (assert (string? expr) "expr is a string")
+   (assert (pos? min-depth) "min depth is at least 1")
+   (assert (>= max-depth min-depth) "max-depth >= min-depth")
+   {::op        (str "(" expr ")")
+    ::params    params
+    ::min-depth min-depth
+    ::max-depth max-depth}))
+
+(defn filter-params->filters
+  "Convert filter parameters like {:item/deleted {:eq false :max-depth 3}} into filters suitable for run-query."
+  [schema params]
+  (reduce (fn [filters [col rule]]
+            (let [table-kw  (table-for schema [col])
+                  table     (name table-kw)
+                  col       (str table "." (name (graphprop->sqlprop schema col)))
+                  legal-ops #{:eq :ne :gt :lt :le :ge :null}
+                  op-key    (first (set/intersection legal-ops (set (keys rule))))
+                  min-depth (get rule :min-depth 1)
+                  max-depth (get rule :max-depth 1000)
+                  op-val    (get rule op-key)
+                  op        (str col (case op-key
+                                       :eq " = ?"
+                                       :ne " <> ?"
+                                       :lt " < ?"
+                                       :gt " > ?"
+                                       :le " <= ?"
+                                       :ge " >= ?"
+                                       :null (if (get rule :null) " IS NULL" " IS NOT NULL")
+                                       (throw (ex-info "Invalid operation in rule" rule))))
+                  params    (if (and (not= op-key :null) op-val) [op-val] [])]
+              (update filters table-kw (fnil conj []) (filter-where op params min-depth max-depth))))
+    {}
+    params))
+
+
+(comment
+  {:account [{:op        "account.deleted IS NULL OR account.deleted = 0" ; string or op keyword
+              :params    []
+              :min-depth 1
+              :max-depth 4
+              }]})
 
 (defn query-for
   "Returns an SQL query to get the true data columns that exist for the graph-query. Joins will contribute to this
@@ -443,14 +493,14 @@
          id-col               (if sql-join-column
                                 (str-col sql-join-column)
                                 (str-idcol schema table))
-         [general-filter params] (row-filter schema filtering #{table-name})]
+         [general-filter params] (row-filter schema filtering #{table})]
      (if has-join-table?
        (let [left-table  (-> join-path second namespace)
              right-table (-> join-path last namespace)
              col-left    (-> join-path (nth 2) str-col)
              col-right   (-> join-path (nth 3) str-col)
              filter-col  (-> join-path second str-col)
-             [general-filter params] (row-filter schema filtering #{left-table right-table})
+             [general-filter params] (row-filter schema filtering #{(keyword left-table) (keyword right-table)})
              from-clause (str "FROM " left-table " INNER JOIN " right-table " ON " col-left " = " col-right)
              ids         (str/join "," id-set)]
          [(str "SELECT " selectors " " from-clause " WHERE " (when general-filter (str general-filter " AND ")) filter-col " IN (" ids ")") params])

@@ -9,7 +9,8 @@
     [clojure.java.jdbc :as jdbc]
     [clj-time.jdbc]
     [taoensso.timbre :as timbre])
-  (:import (com.cognitect.transit TaggedValue)))
+  (:import (com.cognitect.transit TaggedValue)
+           (clojure.lang ExceptionInfo)))
 
 (def test-database {:hikaricp-config "test.properties"
                     :migrations      ["classpath:migrations/test"]})
@@ -190,37 +191,46 @@
     (core/reverse? test-schema {:account/settings [:db/id]}) => false
     (core/reverse? test-schema {:invoice/items [:db/id]}) => true))
 
+(specification "filter-params->filters"
+  (assertions
+    "Converts a map of column filter parameters into filters for run-query"
+    (core/filter-params->filters test-schema {:item/deleted {:eq 1 :max-depth 2}}) => {:item [(core/filter-where "item.deleted = ?" [1] 1 2)]}
+    "Can specify min and max depth"
+    (core/filter-params->filters test-schema
+      {:item/deleted {:eq 1 :max-depth 2}
+       :member/id    {:gt 0 :min-depth 4}}) => {:item   [(core/filter-where "item.deleted = ?" [1] 1 2)]
+                                                :member [(core/filter-where "member.id > ?" [0] 4 1000)]}
+    "Support null checks"
+    (core/filter-params->filters test-schema
+      {:item/other {:null true}
+       :account/id {:null false}}) => {:item    [(core/filter-where "item.other IS NULL" [])]
+                                       :account [(core/filter-where "account.id IS NOT NULL" [])]}
+    "Supports multiple filters on the same table"
+    (core/filter-params->filters test-schema
+      {:item/deleted  {:eq 1 :max-depth 2}
+       :item/quantity {:gt 0}
+       }) => {:item [(core/filter-where "item.deleted = ?" [1] 1 2)
+                     (core/filter-where "item.quantity > ?" [0])]}
+    "Throws a descriptive error when an unknown operation is used"
+    (core/filter-params->filters test-schema {:item/deleted {:boo 1}}) =throws=> (ExceptionInfo #"Invalid operation in rule" (fn [e]
+                                                                                                                               (= (ex-data e) {:boo 1})))))
+
 (specification "row-filter"
   (assertions
     "Returns [nil nil] if no filtering is needed"
-    (#'core/row-filter test-schema {} #{"account"}) => [nil nil]
+    (#'core/row-filter test-schema {} #{:account}) => [nil nil]
     "The first element returned is an AND-joined clause of ONLY conditions that apply to the given table(s)"
-    (first (#'core/row-filter test-schema {:account/deleted {:ne 44} :member/boo {:eq 2}} #{"account"})) => "account.deleted <> ?"
-    (first (#'core/row-filter test-schema {:account/deleted {:ne 44} :item/id {:ne 44}
-                                           :member/deleted  {:eq false}} #{"account" "member"})) => "account.deleted <> ? AND member.deleted = ?"
+    (first (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
+                                           :member  [(core/filter-where "member.boo = ?" [2])]} #{:account})) => "(account.deleted <> ?)"
+    (first (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
+                                           :item    [(core/filter-where "item.id = ?" [44])]
+                                           :member  [(core/filter-where "member.deleted = ?" [44])]} #{:account :member})) => "(account.deleted <> ?) AND (member.deleted = ?)"
     "The second element returned is an in-order vector of parameters to use in the SQL clause"
-    (second (#'core/row-filter test-schema {:account/deleted {:ne 44}} #{"account"})) => [44]
-    (second (#'core/row-filter test-schema {:account/deleted {:ne 44}
-                                            :member/deleted  {:eq false}} #{"account" "member"})) => [44 false]))
-
-(specification "filtering-expression"
-  (assertions
-    "Honors schema derivation of table name (if the column is in the schema translation map)"
-    (first (#'core/filtering-expression test-schema :person/name {:eq "joe"})) => "member.name = ?"
-    "converts :eq to an SQL = expression"
-    (first (#'core/filtering-expression test-schema :account/deleted {:eq false})) => "account.deleted = ?"
-    "converts :gt to an SQL > expression"
-    (first (#'core/filtering-expression test-schema :account/deleted {:gt 0})) => "account.deleted > ?"
-    "converts :lt to an SQL > expression"
-    (first (#'core/filtering-expression test-schema :account/deleted {:lt 0})) => "account.deleted < ?"
-    "converts :ne to an SQL <> expression"
-    (first (#'core/filtering-expression test-schema :account/deleted {:ne 0})) => "account.deleted <> ?"
-    "Maintains the data type of strings in parameters"
-    (second (#'core/filtering-expression test-schema :account/deleted {:ne "a"})) => "a"
-    "Maintains the data type of booleans in parameters"
-    (second (#'core/filtering-expression test-schema :account/deleted {:ne true})) => true
-    "Maintains the data type of numbers in parameters"
-    (second (#'core/filtering-expression test-schema :account/deleted {:ne 4})) => 4))
+    (second (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
+                                            :item    [(core/filter-where "item.id = ?" [44])]
+                                            :member  [(core/filter-where "member.deleted = ?" [false])]} #{:account :member})) => [44 false]
+    (second (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
+                                            :member  [(core/filter-where "member.boo = ?" [2])]} #{:account})) => [44]))
 
 (specification "Single-level query-for query generation"
   (assertions
@@ -233,8 +243,29 @@
     (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)" nil]
     (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")
     "Supports adding additional filter criteria"
-    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9) {:account/deleted {:eq false}}) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.deleted = ? AND account.id IN (1,5,7,9)" [false]]
-    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9) {:account/deleted {:eq false} :account/age {:gt 22}}) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.deleted = ? AND account.age > ? AND account.id IN (1,5,7,9)" [false, 22]]))
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9) {:account [(core/filter-where "account.deleted = ?" [false])]})
+    => ["SELECT account.id AS \"account/id\" FROM account WHERE (account.deleted = ?) AND account.id IN (1,5,7,9)" [false]]
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9) {:account [(core/filter-where "account.deleted = ? AND account.age > ?" [false 22])]})
+    => ["SELECT account.id AS \"account/id\" FROM account WHERE (account.deleted = ? AND account.age > ?) AND account.id IN (1,5,7,9)" [false, 22]]))
+
+(specification "Run-query internals"
+  (assertions "Returns nil if there are no IDs in the root set"
+    (#'core/run-query* :db test-schema :prop [:a] {} {}) => nil)
+  (behavior "Increments recursion depth tracking"
+    (when-mocking
+      (core/query-for s prop query ids filtering) =1x=> (do
+                                                          (assertions
+                                                            "Filtering is given the depth when generating the query"
+                                                            (get filtering ::core/depth) => 4)
+                                                          [nil nil])
+      (jdbc/query db params) =1x=> []
+      (core/compute-join-results db schema query rows filtering recursion-tracking) =1x=> (do
+                                                                                            (assertions
+                                                                                              "Passes the new depth to any recursive computation of join results"
+                                                                                              (::core/depth recursion-tracking) => 4)
+                                                                                            {})
+
+      (#'core/run-query* :db test-schema :prop [:a] {} #{1} {::core/depth 3}))))
 
 
 (def test-rows [; basic to-one and to-many
@@ -421,9 +452,10 @@
         (core/run-query db h2-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
         "many-to-many (reverse)"
         (core/run-query db h2-schema :account/id query-3 (sorted-set gadget)) => expected-result-3
-        "filtered"
-        (core/run-query db h2-schema :account/id query #{joe} {:item/name {:eq "gadget"}}) => [expected-filtered-result]))))
-
+        "filtered by explicit expression"
+        (core/run-query db h2-schema :account/id query #{joe} {:item [(core/filter-where "item.name = ?" ["gadget"])]}) => [expected-filtered-result]
+        "filtered by params"
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget"}})) => [expected-filtered-result]))))
 
 (comment
   ;; useful to run in the REPL to eliminate info messages from tests:

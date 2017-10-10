@@ -1,3 +1,7 @@
+0.2.0
+-----
+- Support for efficient query filtering (filters converted to SQL WHERE)
+
 0.1.0
 -----
 - Support for MySQL/MariaDB, and H2
