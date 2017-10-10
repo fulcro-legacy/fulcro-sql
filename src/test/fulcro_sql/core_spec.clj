@@ -190,16 +190,31 @@
     (core/reverse? test-schema {:account/settings [:db/id]}) => false
     (core/reverse? test-schema {:invoice/items [:db/id]}) => true))
 
+(specification "row-filter" :focused
+  (assertions
+    "Supports {:eq val}"
+    (core/row-filter test-schema {:account/deleted {:eq true}} #{"account"}) => ["account.deleted = ?" [true]]
+    "Supports {:lt val}"
+    (core/row-filter test-schema {:account/deleted {:lt 44}} #{"account"}) => ["account.deleted < ?" [44]]
+    "Supports {:gt val}"
+    (core/row-filter test-schema {:account/deleted {:gt 44}} #{"account"}) => ["account.deleted > ?" [44]]
+    "Supports {:ne val}"
+    (core/row-filter test-schema {:account/deleted {:ne 44}} #{"account"}) => ["account.deleted <> ?" [44]]))
+
 (specification "Single-level query-for query generation"
   (assertions
     "Generates a base non-recursive SQL query that includes necessary join resolution columns"
-    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
-    (core/query-for test-schema :account/members [:db/id :member/name] (sorted-set 1 5)) => "SELECT member.account_id AS \"member/account_id\",member.id AS \"member/id\",member.name AS \"member/name\" FROM member WHERE member.account_id IN (1,5)"
-    (core/query-for test-schema :account/settings [:db/id :settings/auto-open?] (sorted-set 3)) => "SELECT settings.auto_open AS \"settings/auto_open\",settings.id AS \"settings/id\" FROM settings WHERE settings.id IN (3)"
-    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.bah AS \"boo/bah\",boo.id AS \"boo/id\",boo.name AS \"boo/name\" FROM boo WHERE boo.id IN (3)"
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)" nil]
+    (core/query-for test-schema :account/members [:db/id :member/name] (sorted-set 1 5)) => ["SELECT member.account_id AS \"member/account_id\",member.id AS \"member/id\",member.name AS \"member/name\" FROM member WHERE member.account_id IN (1,5)" nil]
+    (core/query-for test-schema :account/settings [:db/id :settings/auto-open?] (sorted-set 3)) => ["SELECT settings.auto_open AS \"settings/auto_open\",settings.id AS \"settings/id\" FROM settings WHERE settings.id IN (3)" nil]
+    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => ["SELECT boo.bah AS \"boo/bah\",boo.id AS \"boo/id\",boo.name AS \"boo/name\" FROM boo WHERE boo.id IN (3)" nil]
     "Derives correct SQL table name if possible"
-    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
-    (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")))
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)" nil]
+    (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")
+    "Supports adding additional filter criteria"
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9) {:account/deleted {:eq false}}) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.deleted = ? AND account.id IN (1,5,7,9)" [false]]
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9) {:account/deleted {:eq false} :account/age {:gt 22}}) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.deleted = ? AND account.age > ? AND account.id IN (1,5,7,9)" [false, 22]]))
+
 
 (def test-rows [; basic to-one and to-many
                 (core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
@@ -314,10 +329,10 @@
                               :account/members  [{:db/id sam :person/name "Sam"}
                                                  {:db/id sally :person/name "Sally"}]
                               :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                             {:db/id           mary
-                              :account/name    "Mary"
+                             {:db/id            mary
+                              :account/name     "Mary"
                               :account/settings {:db/id mary-settings :settings/auto-open? false}
-                              :account/members [{:db/id judy :person/name "Judy"}]}]
+                              :account/members  [{:db/id judy :person/name "Judy"}]}]
           query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3 [{:db/id         gadget :item/name "gadget"
                               :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
@@ -358,14 +373,18 @@
                               :account/members  [{:db/id sam :person/name "Sam"}
                                                  {:db/id sally :person/name "Sally"}]
                               :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                             {:db/id           mary
-                              :account/name    "Mary"
+                             {:db/id            mary
+                              :account/name     "Mary"
                               :account/settings {:db/id mary-settings :settings/auto-open? false}
-                              :account/members [{:db/id judy :person/name "Judy"}]}]
+                              :account/members  [{:db/id judy :person/name "Judy"}]}]
           query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3 [{:db/id         gadget :item/name "gadget"
                               :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
                                               {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
+          expected-filtered-result {:db/id            joe
+                                    :account/name     "Joe"
+                                    :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                       {:db/id invoice-2 :invoice/items [{:db/id gadget :item/name "gadget"}]}]}
           root-set          #{joe}
           source-table      :account
           fix-nums          (fn [result]
@@ -380,7 +399,10 @@
         "one-to-many query (forward)"
         (core/run-query db h2-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
         "many-to-many (reverse)"
-        (core/run-query db h2-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
+        (core/run-query db h2-schema :account/id query-3 (sorted-set gadget)) => expected-result-3
+        "filtered"
+        (core/run-query db h2-schema :account/id query #{joe} {:item/name {:eq "gadget"}}) => [expected-filtered-result]
+        ))))
 
 
 (comment
