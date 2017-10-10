@@ -190,16 +190,37 @@
     (core/reverse? test-schema {:account/settings [:db/id]}) => false
     (core/reverse? test-schema {:invoice/items [:db/id]}) => true))
 
-(specification "row-filter" :focused
+(specification "row-filter"
   (assertions
-    "Supports {:eq val}"
-    (core/row-filter test-schema {:account/deleted {:eq true}} #{"account"}) => ["account.deleted = ?" [true]]
-    "Supports {:lt val}"
-    (core/row-filter test-schema {:account/deleted {:lt 44}} #{"account"}) => ["account.deleted < ?" [44]]
-    "Supports {:gt val}"
-    (core/row-filter test-schema {:account/deleted {:gt 44}} #{"account"}) => ["account.deleted > ?" [44]]
-    "Supports {:ne val}"
-    (core/row-filter test-schema {:account/deleted {:ne 44}} #{"account"}) => ["account.deleted <> ?" [44]]))
+    "Returns [nil nil] if no filtering is needed"
+    (#'core/row-filter test-schema {} #{"account"}) => [nil nil]
+    "The first element returned is an AND-joined clause of ONLY conditions that apply to the given table(s)"
+    (first (#'core/row-filter test-schema {:account/deleted {:ne 44} :member/boo {:eq 2}} #{"account"})) => "account.deleted <> ?"
+    (first (#'core/row-filter test-schema {:account/deleted {:ne 44} :item/id {:ne 44}
+                                           :member/deleted  {:eq false}} #{"account" "member"})) => "account.deleted <> ? AND member.deleted = ?"
+    "The second element returned is an in-order vector of parameters to use in the SQL clause"
+    (second (#'core/row-filter test-schema {:account/deleted {:ne 44}} #{"account"})) => [44]
+    (second (#'core/row-filter test-schema {:account/deleted {:ne 44}
+                                            :member/deleted  {:eq false}} #{"account" "member"})) => [44 false]))
+
+(specification "filtering-expression"
+  (assertions
+    "Honors schema derivation of table name (if the column is in the schema translation map)"
+    (first (#'core/filtering-expression test-schema :person/name {:eq "joe"})) => "member.name = ?"
+    "converts :eq to an SQL = expression"
+    (first (#'core/filtering-expression test-schema :account/deleted {:eq false})) => "account.deleted = ?"
+    "converts :gt to an SQL > expression"
+    (first (#'core/filtering-expression test-schema :account/deleted {:gt 0})) => "account.deleted > ?"
+    "converts :lt to an SQL > expression"
+    (first (#'core/filtering-expression test-schema :account/deleted {:lt 0})) => "account.deleted < ?"
+    "converts :ne to an SQL <> expression"
+    (first (#'core/filtering-expression test-schema :account/deleted {:ne 0})) => "account.deleted <> ?"
+    "Maintains the data type of strings in parameters"
+    (second (#'core/filtering-expression test-schema :account/deleted {:ne "a"})) => "a"
+    "Maintains the data type of booleans in parameters"
+    (second (#'core/filtering-expression test-schema :account/deleted {:ne true})) => true
+    "Maintains the data type of numbers in parameters"
+    (second (#'core/filtering-expression test-schema :account/deleted {:ne 4})) => 4))
 
 (specification "Single-level query-for query generation"
   (assertions
@@ -357,42 +378,42 @@
   (with-database [db h2-database]
     (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam
                   id/sally id/judy id/joe-settings id/mary-settings]} (core/seed! db h2-schema test-rows)
-          query             [:db/id :account/name {:account/invoices [:db/id
-                                                                      ; TODO: data on join table
-                                                                      ;{:invoice/invoice_items [:invoice_items/quantity]}
-                                                                      {:invoice/items [:db/id :item/name]}]}]
-          expected-result   {:db/id            joe
-                             :account/name     "Joe"
-                             :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
-                                                {:db/id invoice-2 :invoice/items [{:db/id widget :item/name "widget"}
-                                                                                  {:db/id spanner :item/name "spanner"}
-                                                                                  {:db/id gadget :item/name "gadget"}]}]}
-          query-2           [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
-          expected-result-2 [{:db/id            joe
-                              :account/name     "Joe"
-                              :account/members  [{:db/id sam :person/name "Sam"}
-                                                 {:db/id sally :person/name "Sally"}]
-                              :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                             {:db/id            mary
-                              :account/name     "Mary"
-                              :account/settings {:db/id mary-settings :settings/auto-open? false}
-                              :account/members  [{:db/id judy :person/name "Judy"}]}]
-          query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
-          expected-result-3 [{:db/id         gadget :item/name "gadget"
-                              :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
-                                              {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
+          query                    [:db/id :account/name {:account/invoices [:db/id
+                                                                             ; TODO: data on join table
+                                                                             ;{:invoice/invoice_items [:invoice_items/quantity]}
+                                                                             {:invoice/items [:db/id :item/name]}]}]
+          expected-result          {:db/id            joe
+                                    :account/name     "Joe"
+                                    :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                       {:db/id invoice-2 :invoice/items [{:db/id widget :item/name "widget"}
+                                                                                         {:db/id spanner :item/name "spanner"}
+                                                                                         {:db/id gadget :item/name "gadget"}]}]}
+          query-2                  [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
+          expected-result-2        [{:db/id            joe
+                                     :account/name     "Joe"
+                                     :account/members  [{:db/id sam :person/name "Sam"}
+                                                        {:db/id sally :person/name "Sally"}]
+                                     :account/settings {:db/id joe-settings :settings/auto-open? true}}
+                                    {:db/id            mary
+                                     :account/name     "Mary"
+                                     :account/settings {:db/id mary-settings :settings/auto-open? false}
+                                     :account/members  [{:db/id judy :person/name "Judy"}]}]
+          query-3                  [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
+          expected-result-3        [{:db/id         gadget :item/name "gadget"
+                                     :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
+                                                     {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
           expected-filtered-result {:db/id            joe
                                     :account/name     "Joe"
                                     :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
                                                        {:db/id invoice-2 :invoice/items [{:db/id gadget :item/name "gadget"}]}]}
-          root-set          #{joe}
-          source-table      :account
-          fix-nums          (fn [result]
-                              (clojure.walk/postwalk
-                                (fn [ele]
-                                  (if (= java.math.BigInteger (type ele))
-                                    (long ele)
-                                    ele)) result))]
+          root-set                 #{joe}
+          source-table             :account
+          fix-nums                 (fn [result]
+                                     (clojure.walk/postwalk
+                                       (fn [ele]
+                                         (if (= java.math.BigInteger (type ele))
+                                           (long ele)
+                                           ele)) result))]
       (assertions
         "many-to-many (forward)"
         (core/run-query db h2-schema :account/id query #{joe}) => [expected-result]
@@ -401,11 +422,11 @@
         "many-to-many (reverse)"
         (core/run-query db h2-schema :account/id query-3 (sorted-set gadget)) => expected-result-3
         "filtered"
-        (core/run-query db h2-schema :account/id query #{joe} {:item/name {:eq "gadget"}}) => [expected-filtered-result]
-        ))))
+        (core/run-query db h2-schema :account/id query #{joe} {:item/name {:eq "gadget"}}) => [expected-filtered-result]))))
 
 
 (comment
+  ;; useful to run in the REPL to eliminate info messages from tests:
   (do
     (require 'taoensso.timbre)
     (taoensso.timbre/set-level! :error)))
