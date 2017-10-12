@@ -225,6 +225,16 @@
     (first (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
                                            :item    [(core/filter-where "item.id = ?" [44])]
                                            :member  [(core/filter-where "member.deleted = ?" [44])]} #{:account :member})) => "(account.deleted <> ?) AND (member.deleted = ?)"
+    "Honors the minimum depth"
+    (first (#'core/row-filter test-schema {::core/depth 2
+                                           :account     [(core/filter-where "account.deleted <> ?" [44] 3 1000)]} #{:account})) => nil
+    (first (#'core/row-filter test-schema {::core/depth 3
+                                           :account     [(core/filter-where "account.deleted <> ?" [44] 3 1000)]} #{:account})) =fn=> seq
+    "Honors the maximum depth"
+    (first (#'core/row-filter test-schema {::core/depth 2
+                                           :account     [(core/filter-where "account.deleted <> ?" [44] 1 1)]} #{:account})) => nil
+    (first (#'core/row-filter test-schema {::core/depth 1
+                                           :account     [(core/filter-where "account.deleted <> ?" [44] 1 1)]} #{:account})) =fn=> seq
     "The second element returned is an in-order vector of parameters to use in the SQL clause"
     (second (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
                                             :item    [(core/filter-where "item.id = ?" [44])]
@@ -455,7 +465,13 @@
         "filtered by explicit expression"
         (core/run-query db h2-schema :account/id query #{joe} {:item [(core/filter-where "item.name = ?" ["gadget"])]}) => [expected-filtered-result]
         "filtered by params"
-        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget"}})) => [expected-filtered-result]))))
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget"}})) => [expected-filtered-result]
+        "With min-depth limited filters"
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget" :min-depth 3}})) => [expected-filtered-result]
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget" :min-depth 4}})) => [expected-result]
+        "With max-depth limited filters"
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget" :max-depth 3}})) => [expected-filtered-result]
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget" :max-depth 2}})) => [expected-result]))))
 
 (comment
   ;; useful to run in the REPL to eliminate info messages from tests:

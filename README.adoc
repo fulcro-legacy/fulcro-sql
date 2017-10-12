@@ -6,13 +6,15 @@ configuration is also a bit less than optimal, and will ideally be optimized.
 
 A utility library for working with SQL databases. It includes the following:
 
+- The ability to run a subset of Datomic's pull API (Om Next query syntax)
+ against SQL databases:
+  `(run-query db schema :root-key om-subquery #{ids of root entity(s)} optional-filtering)`
 - A `com.stuartsierra` component for starting, building, connection pooling,
   and schema migrations.
 - A `with-database` test wrapper for easily writing integration tests. It manages the complete
 lifecycle of a test database within each test.
 - Database seeding tools with abstract ID support. Useful for testing, development, *and* production.
    - NOTE: MySQL may not be able to allocate IDs properly, and thus seed is not recommended for production there.
-- Tools that can convert Om Next query syntax into an SQL query.
 
 Thus, it is useful for general SQL development (the graph utilities are relatively small), and
 is particularly well-suited when you need to use SQL databases from Fulcro or Om Next.
@@ -26,6 +28,7 @@ At present there are tests and drivers for:
 
 - PostgreSQL
 - MySQL
+- H2
 
 Adding additional support is pretty trivial. See <<adding-driver>>.
 
@@ -339,8 +342,6 @@ need to derive a "root set". A root set is simply the IDs of the entities that s
 root the graph traversal. You might figure this out from query `params`, the user's session,
 a special request cookie, or some other criteria.
 
-TODO: Test the following for typos:
-
 ```
 (defquery-root :accounts
   (value [{:keys [dbs query]} params]
@@ -432,6 +433,156 @@ It is important for your SQL database to have indexes on all foreign keys. This 
 to run a query with a `WHERE x IN set` as the only filter criteria. This algorithm also assumes that there is no
 (practical) limit on the number of things that can be asked for with SQL `IN`.
 
+== Filtering
+
+This library supports arbitrary filtering of the SQL tables that supply data to satisfy the
+graph query. There is a simple mechanism for common filtering that can easily and safely be used from the
+client, and the underlying more general (and powerful) mechanism that is not secure for client use,
+and should be used with care.
+
+Since the easy/secure one just emits a checked version of the latter, and the latter one is also what is
+used in the API we'll start by describing the latter.
+
+=== Fully General Filtering
+
+This filtering mechanism has you write SQL clauses that can appear in a WHERE clause. To prevent SQL injection,
+the SQL clause is parameterized if you embed `?`. The filters are specified as follows:
+
+```
+{ :table [(filter-where "table.x = ?" [3])]
+  :other_table [(filter-where "other_table.deleted = false" [])]}
+```
+
+In other words filters are a map keyed by SQL table names (as keywords), whose values are a vector of
+filters to apply to that table when it is queried. Each filter is defined using `filter-where`:
+
+```
+(filter-where expr params)
+```
+Or
+```
+(filter-where expr params min-depth max-depth)
+```
+
+The `params` must be a vector (but can be empty), and the min/max depth are optional.
+
+For example, given the following query:
+
+```
+[:member/name {:member/billing [:billing/address {:billing/country [:country/name]}]}]
+```
+
+Let's say `:member/billing` is a to-one relationship, but you update that table
+by adding a new row and marking the old one with a `deleted` flag for auditing
+purposes. The SQL join will return too many rows without a filter, and the Fulcro
+client should not have to even know about this server-side concern.
+
+So, to serve this particular query you'd include a filter like this:
+
+```
+{:billing [(filter-where "billing.deleted = false" [])]}
+```
+
+in your call to `run-query`.
+
+==== Filter Depth
+
+Specifying a depth for a filter indicates that the filter should only apply within that range of graph
+depths. *They are 1-based numbers, and are inclusive*.
+
+So a query has the following depths:
+
+```
+[:member/name {:member/billing [:billing/address {:billing/country [:country/name]}]}]
+      1               1                 2                 2                3
+```
+
+Thus, a filter with a `min-depth` of 4 would never apply to the above query, and
+a filter on `country` with a `max-depth` of 2 would also never apply.
+
+Depth is calculated as the graph is executed, so recursive queries will have an
+ever-increasing depth. Thus, a query like this:
+
+```
+[:category/name {:category/subcategory ...}]
+```
+
+would start at depth 1, but might go many levels deep. A filter with `min-depth` of 3
+and `max-depth` of 3 would only apply to the second subcategory, but not any others.
+
+== Easy Filters (client-facing)
+
+There are times when it is useful for the Fulcro client to specify filtering parameters.
+The general mechanism described above allows for arbitrary SQL, so it is unsafe to
+use from the client; however, simple expressions can be safely encoded using the
+following EDN scheme: A map whose key is a prop (table/column), and whose value
+is a map of operator keyword to value:
+
+```
+{:table/column {:op value}}
+```
+
+For example: `{:billing/deleted {:eq false}}`
+
+Depth can be configured with `:min-depth` and `:max-depth` in the argument map:
+`{:billing/deleted {:eq false :min-depth 1 :max-depth 2}}` would mean that the filter
+on `billing.deleted = false` only applies for the query portions at depths 1 and 2.
+
+Easy filters must be transformed to the general form using `filter-params->filters`
+function:
+
+```
+(filter-params->filters schema {:billing/deleted {:eq false}})
+```
+
+which will emit the correct general-purpose filters described in the prior section:
+
+```
+{:billing [(filter-where "billing.deleted = ?" [false])]}
+```
+
+ensuring that the value is parameterized so SQL injection is impossible.
+
+The supported operations of `filter-params->filters` are:
+
+.Legal Operations
+|===
+|op |SQL Operator
+
+| `:eq`
+| `=`
+
+| `:ne`
+| `<>`
+
+|`:gt`
+| `>`
+
+|`:ge`
+| `>=`
+
+|`:lt`
+| `<`
+
+|`:le`
+| `<=`
+
+|`:null false`
+| `IS NOT NULL`
+
+|`:null true`
+| `IS NULL`
+|===
+
+The values supplied by the client are not transformed in any way; therefore you must
+ensure that the values incoming from the client are compatible with the column
+types in your database.
+
+Extending this set is trivial (see the code of `filter-params->filters`) but is
+not yet generalized to allow for driver-specific operators. If you'd like to
+contribute to this mechanism, please join the `#fulcro` Clojurians Slack channel
+and discuss it.
+
 == Contributing to Fulcro-SQL Development
 
 Please join the `#fulcro` Slack channel in http://clojurians.slack.com. Discuss how you'd like to help.
@@ -448,5 +599,10 @@ The tests are encoded via fulcro-spec, but are just plain clj tests, so you can 
 however you would normally run clojure tests; however, the output and UI are much better
 if you use the web-based rendering.
 
+== Support
+
+You may be able to get questions answered on the `#fulcro` Clojurians Slack channel. Paid
+commercial support and consulting can be obtained from
+http://www.fulcrologic.com[Fulcrologic].
 
 

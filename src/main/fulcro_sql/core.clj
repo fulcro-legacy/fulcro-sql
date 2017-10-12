@@ -402,13 +402,15 @@
 
 (defn- row-filter
   "Generate a row filter based on the filtering configuration and a set of table names (strings)"
-  [schema filtering table-set]
+  [schema {:keys [::depth] :or {::depth 1} :as filtering} table-set]
   (let [instructions (mapcat #(get filtering %) table-set)
+        instructions-for-current-depth (filter (fn [{:keys [::min-depth ::max-depth]}]
+                                                 (<= min-depth depth max-depth)) instructions)
         [clauses params] (reduce
                            (fn filter-step [[clause clause-params] {:keys [::op ::params ::min-depth ::max-depth] :as instruction}]
                              (assert (s/valid? ::instruction instruction) (str instruction "is valid"))
                              [(conj clause op) (concat clause-params params)])
-                           [[] []] instructions)]
+                           [[] []] instructions-for-current-depth)]
     (if (seq clauses)
       [(str/join " AND " clauses) params]
       [nil nil])))

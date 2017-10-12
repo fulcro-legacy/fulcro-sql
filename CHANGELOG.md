@@ -1,6 +1,7 @@
 0.2.0
 -----
 - Support for efficient query filtering (filters converted to SQL WHERE)
+- Support for minimum and maximum depth on filters so they can be targeted at levels of the graph query
 
 0.1.0
 -----
