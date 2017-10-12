@@ -387,6 +387,86 @@
         join-description (get joins jk)]
     (first join-description)))
 
+(s/def ::op string?)
+(s/def ::params vector?)
+(s/def ::min-depth integer?)
+(s/def ::max-depth integer?)
+(s/def ::instruction (s/keys :req [::op ::params ::min-depth ::max-depth]))
+
+(defn- filtering-expression
+  "Returns a clause and parameter for a given instruction."
+  [schema instruction]
+  (assert (s/valid? ::instruction instruction) "Filtering instruction is valid.")
+  (let [{:keys [::op ::params]} instruction]
+    [op params]))
+
+(defn- row-filter
+  "Generate a row filter based on the filtering configuration and a set of table names (strings)"
+  [schema {:keys [::depth] :or {::depth 1} :as filtering} table-set]
+  (let [instructions (mapcat #(get filtering %) table-set)
+        instructions-for-current-depth (filter (fn [{:keys [::min-depth ::max-depth]}]
+                                                 (<= min-depth depth max-depth)) instructions)
+        [clauses params] (reduce
+                           (fn filter-step [[clause clause-params] {:keys [::op ::params ::min-depth ::max-depth] :as instruction}]
+                             (assert (s/valid? ::instruction instruction) (str instruction "is valid"))
+                             [(conj clause op) (concat clause-params params)])
+                           [[] []] instructions-for-current-depth)]
+    (if (seq clauses)
+      [(str/join " AND " clauses) params]
+      [nil nil])))
+
+(defn filter-where
+  "Creates a filter usable on the graph:
+
+  expr - An SQL boolean expression usable within a WHERE clause
+  params - A vector of values to plug into any ? of expr
+  min-depth - The starting depth at which this expression applies. Defaults to 1 (top level)
+  max-depth - The ending depth (inclusive) at which this expression applies. Must be >= min depth"
+  ([expr params] (filter-where expr params 1 1000))
+  ([expr params min-depth max-depth]
+   (assert (vector? params) "filter params is a vector")
+   (assert (string? expr) "expr is a string")
+   (assert (pos? min-depth) "min depth is at least 1")
+   (assert (>= max-depth min-depth) "max-depth >= min-depth")
+   {::op        (str "(" expr ")")
+    ::params    params
+    ::min-depth min-depth
+    ::max-depth max-depth}))
+
+(defn filter-params->filters
+  "Convert filter parameters like {:item/deleted {:eq false :max-depth 3}} into filters suitable for run-query."
+  [schema params]
+  (reduce (fn [filters [col rule]]
+            (let [table-kw  (table-for schema [col])
+                  table     (name table-kw)
+                  col       (str table "." (name (graphprop->sqlprop schema col)))
+                  legal-ops #{:eq :ne :gt :lt :le :ge :null}
+                  op-key    (first (set/intersection legal-ops (set (keys rule))))
+                  min-depth (get rule :min-depth 1)
+                  max-depth (get rule :max-depth 1000)
+                  op-val    (get rule op-key)
+                  op        (str col (case op-key
+                                       :eq " = ?"
+                                       :ne " <> ?"
+                                       :lt " < ?"
+                                       :gt " > ?"
+                                       :le " <= ?"
+                                       :ge " >= ?"
+                                       :null (if (get rule :null) " IS NULL" " IS NOT NULL")
+                                       (throw (ex-info "Invalid operation in rule" rule))))
+                  params    (if (and (not= op-key :null) op-val) [op-val] [])]
+              (update filters table-kw (fnil conj []) (filter-where op params min-depth max-depth))))
+    {}
+    params))
+
+
+(comment
+  {:account [{:op        "account.deleted IS NULL OR account.deleted = 0" ; string or op keyword
+              :params    []
+              :min-depth 1
+              :max-depth 4
+              }]})
+
 (defn query-for
   "Returns an SQL query to get the true data columns that exist for the graph-query. Joins will contribute to this
   query iff there is a column on the target table that is needed in order to process the join.
@@ -394,7 +474,8 @@
   graph-join-prop : nil if the id-set is on the table of this query itself, otherwise the fulcro query keyword that was used to follow a join.
   graph-query : the things to pull from the databsae. Table will be derived from this, so you must pull more than just the ID.
   id-set : The ids of the rows you want to pull. If join-col is set, that will be the join column matched against these. Otherwise the PK of the table."
-  ([{:keys [::joins] :as schema} graph-join-prop graph-query id-set]
+  ([schema graph-join-prop graph-query id-set] (query-for schema graph-join-prop graph-query id-set {}))
+  ([{:keys [::joins] :as schema} graph-join-prop graph-query id-set filtering]
    (assert (vector? graph-query) "Om query is a vector: ")
    (assert (or (nil? graph-join-prop) (keyword? graph-join-prop)) "join column is a keyword")
    (assert (set? id-set) "id-set is a set")
@@ -414,17 +495,18 @@
          id-col               (if sql-join-column
                                 (str-col sql-join-column)
                                 (str-idcol schema table))
-         sql                  (if has-join-table?
-                                (let [left-table  (-> join-path second namespace)
-                                      right-table (-> join-path last namespace)
-                                      col-left    (-> join-path (nth 2) str-col)
-                                      col-right   (-> join-path (nth 3) str-col)
-                                      filter-col  (-> join-path second str-col)
-                                      from-clause (str "FROM " left-table " INNER JOIN " right-table " ON " col-left " = " col-right)
-                                      ids         (str/join "," id-set)]
-                                  (str "SELECT " selectors " " from-clause " WHERE " filter-col " IN (" ids ")"))
-                                (str "SELECT " selectors " FROM " table-name " WHERE " id-col " IN (" ids ")"))]
-     sql)))
+         [general-filter params] (row-filter schema filtering #{table})]
+     (if has-join-table?
+       (let [left-table  (-> join-path second namespace)
+             right-table (-> join-path last namespace)
+             col-left    (-> join-path (nth 2) str-col)
+             col-right   (-> join-path (nth 3) str-col)
+             filter-col  (-> join-path second str-col)
+             [general-filter params] (row-filter schema filtering #{(keyword left-table) (keyword right-table)})
+             from-clause (str "FROM " left-table " INNER JOIN " right-table " ON " col-left " = " col-right)
+             ids         (str/join "," id-set)]
+         [(str "SELECT " selectors " " from-clause " WHERE " (when general-filter (str general-filter " AND ")) filter-col " IN (" ids ")") params])
+       [(str "SELECT " selectors " FROM " table-name " WHERE " (when general-filter (str general-filter " AND ")) id-col " IN (" ids ")") params]))))
 
 (defn to-one [join-seq]
   (assert (and (vector? join-seq) (every? keyword? join-seq)) "join sequence is a vector of keywords")
@@ -480,74 +562,95 @@
         ]
     (= 4 (count join-sequence))))
 
+(defn- get-root-set
+  "Get the IDs from a set of rows according to the SQL join column defined by the schema joins for the given join prop."
+  [{:keys [::joins] :as schema} join rows]
+  (let [join-key      (ffirst join)
+        join-sequence (get joins join-key [])
+        root-set-prop (first join-sequence)]
+    (if root-set-prop
+      (reduce (fn [s row]
+                (if-let [id (get row root-set-prop)]
+                  (conj s id)
+                  s)) #{} rows)
+      #{})))
+
+(declare run-query*)
+
+(defn- compute-join-results
+  "Given a database, schema, query, and rows that satisfy the current level of that query: computes (recursively) the
+  joins to satisfy the graph. Loops and recursion limits are tracked via recursion-tracking (which is an internally-maintained
+  map of edges that have been crossed). Note that this function expects to be satisfying join demands for an arbitrary number
+  of rows, so the return value is a map keyed by join key, and value is a map of results grouped-by (keyed) the FK ID found
+  in the source row(s)."
+  [db {:keys [::joins] :as schema} query rows filtering recursion-tracking]
+  (let [query-joins (keep #(when (map? %) %) query)]
+    (reduce
+      (fn [acc query-join]
+        (let [subquery            (join-query query-join)
+              recursive?          (or (= subquery '...) (integer? subquery))
+              recursive-depth     (if (integer? subquery) subquery 1)
+              k                   (join-key query-join)
+              real-query          (if recursive?
+                                    (om/reduce-query-depth query k)
+                                    subquery)
+              root-set            (get-root-set schema query-join rows)
+              loop?               (not-empty (set/intersection (get recursion-tracking k) root-set))
+              updated-recur-track (if (and (not loop?) recursive?)
+                                    (update recursion-tracking k (fnil #(set/union % root-set) #{}))
+                                    recursion-tracking)
+              results             (if (or loop? (< recursive-depth 1))
+                                    nil                     ; this should probably be a {:table/id id} marker to indicate that we aborted recursion
+                                    (run-query* db schema k real-query filtering root-set updated-recur-track))
+              join-sequence       (get joins k)
+              fkid-col            (second join-sequence)
+              grouped-results     (group-by fkid-col results)
+              grouped-results     (if (map? results)
+                                    {(get results fkid-col) results}
+                                    grouped-results)]
+          (assoc acc (join-key query-join) grouped-results)))
+      {}
+      query-joins)))
+
+(defn- do-join
+  "Given a schema, a row, the row's ID column name, and join results for the row (keyed by join key, with values grouped by FK ID):
+   returns the row with the proper joins filled in."
+  [{:keys [::joins] :as schema} row id-column join-results]
+  (reduce
+    (fn [r [jk grouped-results]]
+      (let [join-path   (get joins jk)
+            forward-key (first join-path)
+            row-key     (cond
+                          (uses-join-table? schema jk) forward-key
+                          (forward? schema jk) forward-key
+                          (recursive? schema jk) forward-key
+                          :else id-column)
+            row-id      (get r row-key)
+            join-result (get grouped-results row-id)
+            join-result (if (to-one? join-path)
+                          (first join-result)
+                          join-result)]
+        (if join-result
+          (assoc r jk join-result)
+          r)))
+    row join-results))
+
 (defn- run-query*
-  ([db schema join-or-id-column query root-id-set] (run-query* db schema join-or-id-column query root-id-set {}))
-  ([db {:keys [::joins] :as schema} join-or-id-column query root-id-set recursion-tracking]
+  ([db schema join-or-id-column query filtering root-id-set] (run-query* db schema join-or-id-column query filtering root-id-set {}))
+  ([db {:keys [::joins] :as schema} join-or-id-column query filtering root-id-set recursion-tracking]
     ; NOTE: recursion-tracking is a map: keys are the join key followed through recursion, value is the set of ids.
     ; a loop is detected when the intersection of the new id set and the old id set is not empty
    (assert (s/valid? ::schema schema) "schema is valid")
    (when (seq root-id-set)
-     (let [is-join?                 (contains? joins join-or-id-column)
+     (let [recursion-tracking       (update (or recursion-tracking {}) ::depth (fnil inc 0))
+           current-depth            (::depth recursion-tracking)
+           is-join?                 (contains? joins join-or-id-column)
            join-path                (get joins join-or-id-column [])
            id-column                (if is-join? (second join-path) join-or-id-column)
-           query-joins              (keep #(when (map? %) %) query)
-           sql                      (query-for schema (when is-join? join-or-id-column) query root-id-set)
-           rows                     (jdbc/query db [sql])
-           get-root-set             (fn [join]
-                                      (let [join-key      (ffirst join)
-                                            join-sequence (get joins join-key [])
-                                            root-set-prop (first join-sequence)]
-                                        (if root-set-prop
-                                          (reduce (fn [s row]
-                                                    (if-let [id (get row root-set-prop)]
-                                                      (conj s id)
-                                                      s)) #{} rows)
-                                          #{})))
-           join-results             (reduce
-                                      (fn [acc query-join]
-                                        (let [subquery            (join-query query-join)
-                                              recursive?          (or (= subquery '...) (integer? subquery))
-                                              recursive-depth     (if (integer? subquery) subquery 1)
-                                              k                   (join-key query-join)
-                                              real-query          (if recursive?
-                                                                    (om/reduce-query-depth query k)
-                                                                    subquery)
-                                              root-set            (get-root-set query-join)
-                                              loop?               (not-empty (set/intersection (get recursion-tracking k) root-set))
-                                              updated-recur-track (if (and (not loop?) recursive?)
-                                                                    (update recursion-tracking k (fnil #(set/union % root-set) #{}))
-                                                                    recursion-tracking)
-                                              results             (if (or loop? (< recursive-depth 1))
-                                                                    nil ; this should be a {:table/id id} marker
-                                                                    (run-query* db schema k real-query root-set updated-recur-track))
-                                              join-sequence       (get joins k)
-                                              fkid-col            (second join-sequence)
-                                              grouped-results     (group-by fkid-col results)
-                                              grouped-results     (if (map? results)
-                                                                    {(get results fkid-col) results}
-                                                                    grouped-results)]
-                                          (assoc acc (join-key query-join) grouped-results)))
-                                      {}
-                                      query-joins)
-           join-row-to-join-results (fn [row]
-                                      (reduce
-                                        (fn [r [jk grouped-results]]
-                                          (let [join-path   (get joins jk)
-                                                forward-key (first join-path)
-                                                row-key     (cond
-                                                              (uses-join-table? schema jk) forward-key
-                                                              (forward? schema jk) forward-key
-                                                              (recursive? schema jk) forward-key
-                                                              :else id-column)
-                                                row-id      (get r row-key)
-                                                join-result (get grouped-results row-id)
-                                                join-result (if (to-one? join-path)
-                                                              (first join-result)
-                                                              join-result)]
-                                            (if join-result
-                                              (assoc r jk join-result)
-                                              r)))
-                                        row join-results))
+           [sql params] (query-for schema (when is-join? join-or-id-column) query root-id-set (assoc filtering ::depth current-depth))
+           rows                     (jdbc/query db (into [sql] params))
+           join-results             (compute-join-results db schema query rows filtering recursion-tracking)
+           join-row-to-join-results (fn [row] (do-join schema row id-column join-results))
            final-results            (map join-row-to-join-results rows)]
        (vec final-results)))))
 
@@ -581,24 +684,38 @@
                       whose second join component corresponds to the IDs in root-id-set.
   query - The query to run
   root-id-set - A set of PK values that identify the row(s) that root your graph query
+  filters - A map of filters, keyed by table, whose values are vectors of filter expressions generated by `filter-where`.
+
+  (let [filters {:account [(filter-where \"account.id IS NOT NULL AND account.deleted = ?\" [false])]}]
+    (run-query db schema :account/id #{2} filters))
+
+  There is a helper `filter-params->filters` for converting simple parameters into these more general filters:
+
+  (let [filters (filter-params->filters schema {:account/id {:null false} :account/deleted {:eq false})]
+    (run-query db schema :account/id #{2} filters))
+
+  The former are fully general (since any number of expressions can apply to a single table, and the expression can be
+  arbitrary), whereas the latter are less prone to errors. You should not accept the former from clients, but the latter
+  can be easily checked for security since they have limited scope, are keyed by column, and are immune from SQL injection.
 
   Returns:
   - IF the join-or-id-column is a to-one join: returns a map
   - Otherwise returns a vector of maps, one entry for each ID in root-id-set
   "
-  [db {:keys [::joins ::graph->sql] :as schema} join-or-id-column query root-id-set]
-  (try
-    (jdbc/with-db-transaction [db db]
-      (let [sql-results   (run-query* db schema join-or-id-column query root-id-set)
-            sql->graph    (set/map-invert graph->sql)
-            graph-results (clojure.walk/postwalk (fn [ele]
-                                                   (cond
-                                                     (and (keyword? ele) (= "id" (name ele))) :db/id
-                                                     (keyword? ele) (sqlprop->graphprop schema (get sql->graph ele ele))
-                                                     :else ele)) sql-results)]
-        (strip-join-columns query graph-results)))
-    (catch Throwable t
-      (timbre/error "Graph query failed: " t)
-      (.printStackTrace t))))
+  ([db {:keys [::joins ::graph->sql] :as schema} join-or-id-column query root-id-set] (run-query db schema join-or-id-column query root-id-set {}))
+  ([db {:keys [::joins ::graph->sql] :as schema} join-or-id-column query root-id-set filtering]
+   (try
+     (jdbc/with-db-transaction [db db]
+       (let [sql-results   (run-query* db schema join-or-id-column query filtering root-id-set)
+             sql->graph    (set/map-invert graph->sql)
+             graph-results (clojure.walk/postwalk (fn [ele]
+                                                    (cond
+                                                      (and (keyword? ele) (= "id" (name ele))) :db/id
+                                                      (keyword? ele) (sqlprop->graphprop schema (get sql->graph ele ele))
+                                                      :else ele)) sql-results)]
+         (strip-join-columns query graph-results)))
+     (catch Throwable t
+       (timbre/error "Graph query failed: " t)
+       (.printStackTrace t)))))
 
 

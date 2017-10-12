@@ -9,7 +9,8 @@
     [clojure.java.jdbc :as jdbc]
     [clj-time.jdbc]
     [taoensso.timbre :as timbre])
-  (:import (com.cognitect.transit TaggedValue)))
+  (:import (com.cognitect.transit TaggedValue)
+           (clojure.lang ExceptionInfo)))
 
 (def test-database {:hikaricp-config "test.properties"
                     :migrations      ["classpath:migrations/test"]})
@@ -190,16 +191,92 @@
     (core/reverse? test-schema {:account/settings [:db/id]}) => false
     (core/reverse? test-schema {:invoice/items [:db/id]}) => true))
 
+(specification "filter-params->filters"
+  (assertions
+    "Converts a map of column filter parameters into filters for run-query"
+    (core/filter-params->filters test-schema {:item/deleted {:eq 1 :max-depth 2}}) => {:item [(core/filter-where "item.deleted = ?" [1] 1 2)]}
+    "Can specify min and max depth"
+    (core/filter-params->filters test-schema
+      {:item/deleted {:eq 1 :max-depth 2}
+       :member/id    {:gt 0 :min-depth 4}}) => {:item   [(core/filter-where "item.deleted = ?" [1] 1 2)]
+                                                :member [(core/filter-where "member.id > ?" [0] 4 1000)]}
+    "Support null checks"
+    (core/filter-params->filters test-schema
+      {:item/other {:null true}
+       :account/id {:null false}}) => {:item    [(core/filter-where "item.other IS NULL" [])]
+                                       :account [(core/filter-where "account.id IS NOT NULL" [])]}
+    "Supports multiple filters on the same table"
+    (core/filter-params->filters test-schema
+      {:item/deleted  {:eq 1 :max-depth 2}
+       :item/quantity {:gt 0}
+       }) => {:item [(core/filter-where "item.deleted = ?" [1] 1 2)
+                     (core/filter-where "item.quantity > ?" [0])]}
+    "Throws a descriptive error when an unknown operation is used"
+    (core/filter-params->filters test-schema {:item/deleted {:boo 1}}) =throws=> (ExceptionInfo #"Invalid operation in rule" (fn [e]
+                                                                                                                               (= (ex-data e) {:boo 1})))))
+
+(specification "row-filter"
+  (assertions
+    "Returns [nil nil] if no filtering is needed"
+    (#'core/row-filter test-schema {} #{:account}) => [nil nil]
+    "The first element returned is an AND-joined clause of ONLY conditions that apply to the given table(s)"
+    (first (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
+                                           :member  [(core/filter-where "member.boo = ?" [2])]} #{:account})) => "(account.deleted <> ?)"
+    (first (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
+                                           :item    [(core/filter-where "item.id = ?" [44])]
+                                           :member  [(core/filter-where "member.deleted = ?" [44])]} #{:account :member})) => "(account.deleted <> ?) AND (member.deleted = ?)"
+    "Honors the minimum depth"
+    (first (#'core/row-filter test-schema {::core/depth 2
+                                           :account     [(core/filter-where "account.deleted <> ?" [44] 3 1000)]} #{:account})) => nil
+    (first (#'core/row-filter test-schema {::core/depth 3
+                                           :account     [(core/filter-where "account.deleted <> ?" [44] 3 1000)]} #{:account})) =fn=> seq
+    "Honors the maximum depth"
+    (first (#'core/row-filter test-schema {::core/depth 2
+                                           :account     [(core/filter-where "account.deleted <> ?" [44] 1 1)]} #{:account})) => nil
+    (first (#'core/row-filter test-schema {::core/depth 1
+                                           :account     [(core/filter-where "account.deleted <> ?" [44] 1 1)]} #{:account})) =fn=> seq
+    "The second element returned is an in-order vector of parameters to use in the SQL clause"
+    (second (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
+                                            :item    [(core/filter-where "item.id = ?" [44])]
+                                            :member  [(core/filter-where "member.deleted = ?" [false])]} #{:account :member})) => [44 false]
+    (second (#'core/row-filter test-schema {:account [(core/filter-where "account.deleted <> ?" [44])]
+                                            :member  [(core/filter-where "member.boo = ?" [2])]} #{:account})) => [44]))
+
 (specification "Single-level query-for query generation"
   (assertions
     "Generates a base non-recursive SQL query that includes necessary join resolution columns"
-    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
-    (core/query-for test-schema :account/members [:db/id :member/name] (sorted-set 1 5)) => "SELECT member.account_id AS \"member/account_id\",member.id AS \"member/id\",member.name AS \"member/name\" FROM member WHERE member.account_id IN (1,5)"
-    (core/query-for test-schema :account/settings [:db/id :settings/auto-open?] (sorted-set 3)) => "SELECT settings.auto_open AS \"settings/auto_open\",settings.id AS \"settings/id\" FROM settings WHERE settings.id IN (3)"
-    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => "SELECT boo.bah AS \"boo/bah\",boo.id AS \"boo/id\",boo.name AS \"boo/name\" FROM boo WHERE boo.id IN (3)"
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)" nil]
+    (core/query-for test-schema :account/members [:db/id :member/name] (sorted-set 1 5)) => ["SELECT member.account_id AS \"member/account_id\",member.id AS \"member/id\",member.name AS \"member/name\" FROM member WHERE member.account_id IN (1,5)" nil]
+    (core/query-for test-schema :account/settings [:db/id :settings/auto-open?] (sorted-set 3)) => ["SELECT settings.auto_open AS \"settings/auto_open\",settings.id AS \"settings/id\" FROM settings WHERE settings.id IN (3)" nil]
+    (core/query-for test-schema nil [:db/id :boo/name :boo/bah] #{3}) => ["SELECT boo.bah AS \"boo/bah\",boo.id AS \"boo/id\",boo.name AS \"boo/name\" FROM boo WHERE boo.id IN (3)" nil]
     "Derives correct SQL table name if possible"
-    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => "SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)"
-    (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")))
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9)) => ["SELECT account.id AS \"account/id\" FROM account WHERE account.id IN (1,5,7,9)" nil]
+    (core/query-for test-schema nil [:db/id] (sorted-set 1 5 7 9)) =throws=> (AssertionError #"Could not determine")
+    "Supports adding additional filter criteria"
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9) {:account [(core/filter-where "account.deleted = ?" [false])]})
+    => ["SELECT account.id AS \"account/id\" FROM account WHERE (account.deleted = ?) AND account.id IN (1,5,7,9)" [false]]
+    (core/query-for test-schema nil [:db/id {:account/members [:db/id :member/name]}] (sorted-set 1 5 7 9) {:account [(core/filter-where "account.deleted = ? AND account.age > ?" [false 22])]})
+    => ["SELECT account.id AS \"account/id\" FROM account WHERE (account.deleted = ? AND account.age > ?) AND account.id IN (1,5,7,9)" [false, 22]]))
+
+(specification "Run-query internals"
+  (assertions "Returns nil if there are no IDs in the root set"
+    (#'core/run-query* :db test-schema :prop [:a] {} {}) => nil)
+  (behavior "Increments recursion depth tracking"
+    (when-mocking
+      (core/query-for s prop query ids filtering) =1x=> (do
+                                                          (assertions
+                                                            "Filtering is given the depth when generating the query"
+                                                            (get filtering ::core/depth) => 4)
+                                                          [nil nil])
+      (jdbc/query db params) =1x=> []
+      (core/compute-join-results db schema query rows filtering recursion-tracking) =1x=> (do
+                                                                                            (assertions
+                                                                                              "Passes the new depth to any recursive computation of join results"
+                                                                                              (::core/depth recursion-tracking) => 4)
+                                                                                            {})
+
+      (#'core/run-query* :db test-schema :prop [:a] {} #{1} {::core/depth 3}))))
+
 
 (def test-rows [; basic to-one and to-many
                 (core/seed-row :settings {:id :id/joe-settings :auto_open true :keyboard_shortcuts false})
@@ -314,10 +391,10 @@
                               :account/members  [{:db/id sam :person/name "Sam"}
                                                  {:db/id sally :person/name "Sally"}]
                               :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                             {:db/id           mary
-                              :account/name    "Mary"
+                             {:db/id            mary
+                              :account/name     "Mary"
                               :account/settings {:db/id mary-settings :settings/auto-open? false}
-                              :account/members [{:db/id judy :person/name "Judy"}]}]
+                              :account/members  [{:db/id judy :person/name "Judy"}]}]
           query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
           expected-result-3 [{:db/id         gadget :item/name "gadget"
                               :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
@@ -342,48 +419,62 @@
   (with-database [db h2-database]
     (let [{:keys [id/joe id/mary id/invoice-1 id/invoice-2 id/gadget id/widget id/spanner id/sam
                   id/sally id/judy id/joe-settings id/mary-settings]} (core/seed! db h2-schema test-rows)
-          query             [:db/id :account/name {:account/invoices [:db/id
-                                                                      ; TODO: data on join table
-                                                                      ;{:invoice/invoice_items [:invoice_items/quantity]}
-                                                                      {:invoice/items [:db/id :item/name]}]}]
-          expected-result   {:db/id            joe
-                             :account/name     "Joe"
-                             :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
-                                                {:db/id invoice-2 :invoice/items [{:db/id widget :item/name "widget"}
-                                                                                  {:db/id spanner :item/name "spanner"}
-                                                                                  {:db/id gadget :item/name "gadget"}]}]}
-          query-2           [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
-          expected-result-2 [{:db/id            joe
-                              :account/name     "Joe"
-                              :account/members  [{:db/id sam :person/name "Sam"}
-                                                 {:db/id sally :person/name "Sally"}]
-                              :account/settings {:db/id joe-settings :settings/auto-open? true}}
-                             {:db/id           mary
-                              :account/name    "Mary"
-                              :account/settings {:db/id mary-settings :settings/auto-open? false}
-                              :account/members [{:db/id judy :person/name "Judy"}]}]
-          query-3           [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
-          expected-result-3 [{:db/id         gadget :item/name "gadget"
-                              :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
-                                              {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
-          root-set          #{joe}
-          source-table      :account
-          fix-nums          (fn [result]
-                              (clojure.walk/postwalk
-                                (fn [ele]
-                                  (if (= java.math.BigInteger (type ele))
-                                    (long ele)
-                                    ele)) result))]
+          query                    [:db/id :account/name {:account/invoices [:db/id
+                                                                             ; TODO: data on join table
+                                                                             ;{:invoice/invoice_items [:invoice_items/quantity]}
+                                                                             {:invoice/items [:db/id :item/name]}]}]
+          expected-result          {:db/id            joe
+                                    :account/name     "Joe"
+                                    :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                       {:db/id invoice-2 :invoice/items [{:db/id widget :item/name "widget"}
+                                                                                         {:db/id spanner :item/name "spanner"}
+                                                                                         {:db/id gadget :item/name "gadget"}]}]}
+          query-2                  [:db/id :account/name {:account/members [:db/id :person/name]} {:account/settings [:db/id :settings/auto-open?]}]
+          expected-result-2        [{:db/id            joe
+                                     :account/name     "Joe"
+                                     :account/members  [{:db/id sam :person/name "Sam"}
+                                                        {:db/id sally :person/name "Sally"}]
+                                     :account/settings {:db/id joe-settings :settings/auto-open? true}}
+                                    {:db/id            mary
+                                     :account/name     "Mary"
+                                     :account/settings {:db/id mary-settings :settings/auto-open? false}
+                                     :account/members  [{:db/id judy :person/name "Judy"}]}]
+          query-3                  [:db/id :item/name {:item/invoices [:db/id {:invoice/account [:db/id :account/name]}]}]
+          expected-result-3        [{:db/id         gadget :item/name "gadget"
+                                     :item/invoices [{:db/id invoice-1 :invoice/account {:db/id joe :account/name "Joe"}}
+                                                     {:db/id invoice-2 :invoice/account {:db/id joe :account/name "Joe"}}]}]
+          expected-filtered-result {:db/id            joe
+                                    :account/name     "Joe"
+                                    :account/invoices [{:db/id invoice-1 :invoice/items [{:db/id gadget :item/name "gadget"}]}
+                                                       {:db/id invoice-2 :invoice/items [{:db/id gadget :item/name "gadget"}]}]}
+          root-set                 #{joe}
+          source-table             :account
+          fix-nums                 (fn [result]
+                                     (clojure.walk/postwalk
+                                       (fn [ele]
+                                         (if (= java.math.BigInteger (type ele))
+                                           (long ele)
+                                           ele)) result))]
       (assertions
         "many-to-many (forward)"
         (core/run-query db h2-schema :account/id query #{joe}) => [expected-result]
         "one-to-many query (forward)"
         (core/run-query db h2-schema :account/id query-2 (sorted-set joe mary)) => expected-result-2
         "many-to-many (reverse)"
-        (core/run-query db h2-schema :account/id query-3 (sorted-set gadget)) => expected-result-3))))
-
+        (core/run-query db h2-schema :account/id query-3 (sorted-set gadget)) => expected-result-3
+        "filtered by explicit expression"
+        (core/run-query db h2-schema :account/id query #{joe} {:item [(core/filter-where "item.name = ?" ["gadget"])]}) => [expected-filtered-result]
+        "filtered by params"
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget"}})) => [expected-filtered-result]
+        "With min-depth limited filters"
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget" :min-depth 3}})) => [expected-filtered-result]
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget" :min-depth 4}})) => [expected-result]
+        "With max-depth limited filters"
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget" :max-depth 3}})) => [expected-filtered-result]
+        (core/run-query db h2-schema :account/id query #{joe} (core/filter-params->filters h2-schema {:item/name {:eq "gadget" :max-depth 2}})) => [expected-result]))))
 
 (comment
+  ;; useful to run in the REPL to eliminate info messages from tests:
   (do
     (require 'taoensso.timbre)
     (taoensso.timbre/set-level! :error)))
