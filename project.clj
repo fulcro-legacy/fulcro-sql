@@ -1,4 +1,4 @@
-(defproject fulcrologic/fulcro-sql "0.2.0"
+(defproject fulcrologic/fulcro-sql "0.2.1-SNAPSHOT"
   :description "A library for using SQL databases as components, writing integration tests, and running Datomic-style graph queries against them."
   :url "http://github.com/fulcrologic/fulcro-sql"
   :license {:name "MIT Public License"}
@@ -11,7 +11,7 @@
 
   :dependencies [[org.clojure/clojure "1.8.0" :scope "provided"]
                  [org.omcljs/om "1.0.0-beta1" :scope "provided"]
-                 [clojure-future-spec "1.9.0-alpha17"]
+                 [clojure-future-spec "1.9.0-beta2"]
                  [org.flywaydb/flyway-core "4.2.0"]
                  [com.zaxxer/HikariCP "2.6.3"]
                  [com.stuartsierra/component "0.3.2"]
@@ -25,7 +25,7 @@
                  [org.slf4j/jcl-over-slf4j "1.7.25" :scope "provided"]
                  [com.fzakaria/slf4j-timbre "0.3.7" :scope "provided"]
 
-                 [fulcrologic/fulcro-spec "1.0.0-beta9" :scope "test" :exclusions [org.clojure/tools.reader]]
+                 [fulcrologic/fulcro-spec "1.0.0" :scope "test" :exclusions [org.clojure/tools.reader]]
                  [clj-time "0.14.0" :scope "test"]
                  [org.mariadb.jdbc/mariadb-java-client "2.1.0" :scope "test"]
                  [org.postgresql/postgresql "42.1.4.jre7" :scope "test"]
