@@ -322,7 +322,7 @@ control any number of databases (of that kind).
 ```
 (easy/make-fulcro-server
   ; inject config into the database manager
-  :components {:dbs (component/using (fulcro-sql.core/map->PostgreSQLDatabaseManager {})} [:config])
+  :components {:dbs (component/using (fulcro-sql.core/map->DatabaseManager {})} [:config])
   :parser-injections #{:dbs})
 ```
 
