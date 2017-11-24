@@ -1,4 +1,4 @@
-(defproject fulcrologic/fulcro-sql "0.2.1-SNAPSHOT"
+(defproject fulcrologic/fulcro-sql "0.3.0-SNAPSHOT"
   :description "A library for using SQL databases as components, writing integration tests, and running Datomic-style graph queries against them."
   :url "http://github.com/fulcrologic/fulcro-sql"
   :license {:name "MIT Public License"}
@@ -10,7 +10,6 @@
                    :resource-paths ["resources" "test-resources"]}}
 
   :dependencies [[org.clojure/clojure "1.8.0" :scope "provided"]
-                 [org.omcljs/om "1.0.0-beta1" :scope "provided"]
                  [clojure-future-spec "1.9.0-beta2"]
                  [org.flywaydb/flyway-core "4.2.0"]
                  [com.zaxxer/HikariCP "2.6.3"]
