@@ -1,6 +1,7 @@
 0.3.0
 -----
 - Dropped dependencies on Om Next
+- Fixed documentation (README)
 
 0.2.0
 -----
