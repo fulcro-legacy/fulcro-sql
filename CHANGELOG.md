@@ -1,3 +1,8 @@
+0.3.0
+-----
+- Dropped dependencies on Om Next
+- Fixed documentation (README)
+
 0.2.0
 -----
 - Support for efficient query filtering (filters converted to SQL WHERE)

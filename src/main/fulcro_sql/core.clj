@@ -8,9 +8,8 @@
             [com.stuartsierra.component :as component]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.set :as set]
-            [om.next :as om]
-            [om.util :as util])
+            [fulcro-sql.util :as util]
+            [clojure.set :as set])
   (:import (org.flywaydb.core Flyway)
            (com.zaxxer.hikari HikariConfig HikariDataSource)
            (java.util Properties)
@@ -403,7 +402,7 @@
 (defn- row-filter
   "Generate a row filter based on the filtering configuration and a set of table names (strings)"
   [schema {:keys [::depth] :or {::depth 1} :as filtering} table-set]
-  (let [instructions (mapcat #(get filtering %) table-set)
+  (let [instructions                   (mapcat #(get filtering %) table-set)
         instructions-for-current-depth (filter (fn [{:keys [::min-depth ::max-depth]}]
                                                  (<= min-depth depth max-depth)) instructions)
         [clauses params] (reduce
@@ -592,7 +591,7 @@
               recursive-depth     (if (integer? subquery) subquery 1)
               k                   (join-key query-join)
               real-query          (if recursive?
-                                    (om/reduce-query-depth query k)
+                                    (util/reduce-query-depth query k)
                                     subquery)
               root-set            (get-root-set schema query-join rows)
               loop?               (not-empty (set/intersection (get recursion-tracking k) root-set))
