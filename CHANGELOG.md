@@ -1,3 +1,7 @@
+0.3.1
+-----
+- Fixed a minor bug that prevented Clojure 1.9 compiles
+
 0.3.0
 -----
 - Dropped dependencies on Om Next

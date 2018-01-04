@@ -401,8 +401,9 @@
 
 (defn- row-filter
   "Generate a row filter based on the filtering configuration and a set of table names (strings)"
-  [schema {:keys [::depth] :or {depth 1} :as filtering} table-set]
-  (let [instructions                   (mapcat #(get filtering %) table-set)
+  [schema {:keys [::depth] :as filtering} table-set]
+  (let [depth                          (or depth 1)
+        instructions                   (mapcat #(get filtering %) table-set)
         instructions-for-current-depth (filter (fn [{:keys [::min-depth ::max-depth]}]
                                                  (<= min-depth depth max-depth)) instructions)
         [clauses params] (reduce
