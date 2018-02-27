@@ -1,4 +1,4 @@
-(defproject fulcrologic/fulcro-sql "0.3.1"
+(defproject fulcrologic/fulcro-sql "0.3.2-SNAPSHOT"
   :description "A library for using SQL databases as components, writing integration tests, and running Datomic-style graph queries against them."
   :url "http://github.com/fulcrologic/fulcro-sql"
   :license {:name "MIT Public License"}

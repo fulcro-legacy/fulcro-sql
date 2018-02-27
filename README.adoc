@@ -146,8 +146,7 @@ These default to `:id`, so technically you only need them if you used something 
 The `graph->sql` map is just one stage of the property mapping. The complete property transform process is:
 
 1. Look up the graph property in `::core/graph->sql`, if present.
-2. The result of step (1) is processed by the multimethod `graphprop->sqlprop*`, dispatched by the `:driver` in your
-config. The default transform just replaces `-` with `_`.
+2. The result of step (1) is processed by the multimethod `graphprop->sqlprop*`, dispatched by the `:driver` in your config. The default transform just replaces `-` with `_`.
 
 ==== Support for to-one:
 
@@ -384,11 +383,11 @@ returning the correct data map key. For example: `(column-spec* schema :account/
 PostgreSQL on the `account` table, this would be the result of running `SELECT nextval('account_id_seq') AS \"id\"`.
 
 It is possible that your driver has the exact same logic as some other driver for some of these. In that
-case you can dispatch to the alternate simply by passing an altered `:driver` in `schema`:
+case you can dispatch to the alternate simply by passing an altered `::sql/driver` in `schema`:
 
 ```
 (defmethod next-id* :my-driver [db schema table]
-  (next-id* db (assoc schema :driver :default) table))
+  (next-id* db (assoc schema ::sql/driver :default) table))
 ```
 
 Note that all of the examples above are the `:default` behavior, so if your driver needs to only modify, say,

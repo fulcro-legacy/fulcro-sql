@@ -30,7 +30,7 @@
                   :req [::pks ::graph->sql ::joins]
                   :opt [::driver]))
 
-(defmulti graphprop->sqlprop* (fn sqlize-dispatch [schema kw] (get schema :driver :default)))
+(defmulti graphprop->sqlprop* (fn sqlize-dispatch [schema kw] (get schema ::driver :default)))
 
 (defmethod graphprop->sqlprop* :default [schema kw]
   (let [nspc (some-> kw namespace (str/replace "-" "_"))
@@ -44,7 +44,7 @@
   [schema kw]
   (graphprop->sqlprop* schema kw))
 
-(defmulti sqlprop->graphprop* (fn omize-dispatch [schema kw] (get schema :driver :default)))
+(defmulti sqlprop->graphprop* (fn omize-dispatch [schema kw] (get schema ::driver :default)))
 
 (defmethod sqlprop->graphprop* :default [schema kw]
   (let [nspc (some-> kw namespace (str/replace "_" "-"))
@@ -66,7 +66,7 @@
       (get graph->sql (ffirst p) (ffirst p))
       (get graph->sql p p))))
 
-(defmulti table-for* (fn [schema query] (get schema :driver :default)))
+(defmulti table-for* (fn [schema query] (get schema ::driver :default)))
 
 (defmethod table-for* :default
   [schema query]
@@ -154,11 +154,11 @@
   (jdbc/execute! db ["CREATE SCHEMA PUBLIC"]))
 
 (defmethod create-drop* :h2 [db dbkey dbconfig]
-  (timbre/info "Create-drop was set. Cleaning everything out of the database " dbkey " (PostgreSQL).")
+  (timbre/info "Create-drop was set. Cleaning everything out of the database " dbkey " (H2).")
   (jdbc/execute! db ["DROP ALL OBJECTS"]))
 
 (defmethod create-drop* :mysql [db dbkey dbconfig]
-  (let [name (get dbconfig :database-name (name dbkey))]
+  (let [name (get dbconfig ::database-name (name dbkey))]
     (timbre/info "Create-drop was set. Cleaning everything out of the database " name " (MySQL).")
     (jdbc/execute! db [(str "DROP DATABASE " name)])
     (jdbc/execute! db [(str "CREATE DATABASE " name)])
@@ -213,7 +213,7 @@
   [config] (map->DatabaseManager {:config config}))
 
 (defmulti next-id*
-  (fn next-id-dispatch [db schema table] (get schema :driver :default)))
+  (fn next-id-dispatch [db schema table] (get schema ::driver :default)))
 
 (defmethod next-id* :mysql
   [db schema table]
@@ -235,7 +235,7 @@
 
 (defmethod next-id* :default
   [db schema table]
-  (next-id* db (assoc schema :driver :postgresql) table))
+  (next-id* db (assoc schema ::driver :postgresql) table))
 
 (defn next-id
   "Get the next generated ID for the given table.
