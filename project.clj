@@ -1,4 +1,4 @@
-(defproject fulcrologic/fulcro-sql "0.3.2-SNAPSHOT"
+(defproject fulcrologic/fulcro-sql "0.3.2"
   :description "A library for using SQL databases as components, writing integration tests, and running Datomic-style graph queries against them."
   :url "http://github.com/fulcrologic/fulcro-sql"
   :license {:name "MIT Public License"}
@@ -14,7 +14,7 @@
                  [org.flywaydb/flyway-core "4.2.0"]
                  [com.zaxxer/HikariCP "2.7.4"]
                  [com.stuartsierra/component "0.3.2"]
-                 [org.clojure/java.jdbc "0.7.3"]
+                 [org.clojure/java.jdbc "0.7.5"]
                  [com.taoensso/timbre "4.10.0"]
 
                  ; Logging: If you include these dependencies you can forward
@@ -28,5 +28,5 @@
                  [fulcrologic/fulcro-spec "2.0.0-beta3" :scope "test" ]
                  [clj-time "0.14.2" :scope "test"]
                  [org.mariadb.jdbc/mariadb-java-client "2.2.0" :scope "test"]
-                 [org.postgresql/postgresql "42.1.4.jre7" :scope "test"]
+                 [org.postgresql/postgresql "42.1.4" :scope "test"]
                  [com.h2database/h2 "1.4.196" :scope "test"]])
