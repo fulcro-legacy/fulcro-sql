@@ -45,11 +45,11 @@
                   ::core/pks        {}})
 (def mysql-schema
   (assoc test-schema
-    :driver :mysql
-    :database-name "test"))                                 ; needed for create/drop in mysql...there is no drop schema
+    ::core/driver :mysql
+    ::core/database-name "test"))                                 ; needed for create/drop in mysql...there is no drop schema
 
 (def h2-schema
-  (assoc test-schema :driver :h2))
+  (assoc test-schema ::core/driver :h2))
 
 (specification "Database Component" :integration
   (behavior "Can create a functional database pool from HikariCP properties and Flyway migrations."
