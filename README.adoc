@@ -2,21 +2,24 @@
 
 A utility library for working with SQL databases. It includes the following:
 
-- The ability to run a subset of Datomic's pull API (Om Next query syntax)
- against SQL databases:
-  `(run-query db schema :root-key om-subquery #{ids of root entity(s)} optional-filtering)`
 - A `com.stuartsierra` component for starting, building, connection pooling,
   and schema migrations.
 - A `with-database` test wrapper for easily writing integration tests. It manages the complete
 lifecycle of a test database within each test.
 - Database seeding tools with abstract ID support. Useful for testing, development, *and* production.
    - NOTE: MySQL may not be able to allocate IDs properly, and thus `seed` is not recommended for production there.
-
-Thus, it is useful for general SQL development (the graph utilities are relatively small), and
-is particularly well-suited when you need to use SQL databases from Fulcro or Om Next.
+- The ability to run a subset of Datomic's pull API (Om Next query syntax)
+ against SQL databases:
+  `(run-query db schema :root-key om-subquery #{ids of root entity(s)} optional-filtering)`
 
 Connection pooling is provided by http://brettwooldridge.github.io/HikariCP/[HikariCP].
 Migrations are provided by http://flywaydb.org/[Flyway].
+
+WARNING: This library's graph query support should be considered a proof of concept. That part was added to show
+that it could be done.  The library has some other useful elements (e.g. the database component setup with
+migrations and connection pooling), but the actual graph query support has better alternatives at this point. You
+should check out https://github.com/wilkerlucio/pathom[PathOm] for general query parsing, and if you really
+want more of a DSL check out https://github.com/walkable-server/walkable[Walkable].
 
 == Supported Databases
 
